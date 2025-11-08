@@ -8,11 +8,13 @@ set(SOURCES
     dag/dag_generator.cpp
     utils/logger.cpp
     utils/hex_utils.cpp
+    utils/difficulty.cpp
 )
 
 # CUDA source files
 set(CUDA_SOURCES
     cuda/device_manager.cu
+    cuda/dag_kernel.cu
     cuda/kernels/ethash_kernel.cu
     cuda/kernels/search_kernel.cu
 )

@@ -26,6 +26,7 @@ struct Solution {
     uint64_t nonce;
     hash32_t mixHash;
     hash32_t result;
+    std::string jobId;  // Job ID this solution is for
 };
 
 // Mining statistics

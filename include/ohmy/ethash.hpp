@@ -59,6 +59,12 @@ public:
     static uint32_t getEpoch(uint64_t blockNumber);
 
     /**
+     * @brief Derive epoch number from a given seed hash by iterating Keccak256 from zero.
+     * Returns UINT32_MAX if not found within a sane bound.
+     */
+    static uint32_t epochFromSeedHash(const hash32_t& seedHash);
+
+    /**
      * @brief Verify a mining solution
      */
     static bool verifySolution(
@@ -67,6 +73,24 @@ public:
         const hash32_t& mixHash,
         const hash32_t& result,
         uint64_t target
+    );
+
+    /**
+     * @brief Compute Ethash (Hashimoto) result and mix for a given header+nonce using a full DAG
+     * @param headerHash 32-byte header hash (big-endian as provided by pool)
+     * @param nonce 64-bit nonce (little-endian when concatenated)
+     * @param dag Pointer to DAG in memory (array of 64-byte items)
+     * @param dagSize Size of DAG in bytes
+     * @param outMixHash Output 32-byte mix digest
+     * @param outResult Output 32-byte final result hash (Keccak256)
+     */
+    static void computeHashimoto(
+        const hash32_t& headerHash,
+        uint64_t nonce,
+        const void* dag,
+        size_t dagSize,
+        hash32_t& outMixHash,
+        hash32_t& outResult
     );
 
 private:

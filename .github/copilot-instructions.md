@@ -67,6 +67,15 @@ ctest --verbose
 - Error checking after every CUDA API call
 - Kernel launch configurations tuned per GPU architecture
 
+### GPU-First Development Philosophy
+- **ALWAYS prefer GPU over CPU for compute-intensive operations**
+- DAG generation MUST use GPU kernels (not CPU multi-threading)
+- Hash calculations MUST run on GPU (Keccak, Ethash, FNV)
+- Only use CPU for: control flow, network I/O, configuration, logging
+- When implementing new features, ask: "Can this run on GPU?" before writing CPU code
+- CPU fallback is acceptable ONLY for error recovery or unsupported hardware
+- Multi-threading on CPU is a last resort, not a primary optimization strategy
+
 ### Error Handling
 - Exceptions for recoverable errors
 - Logging levels: TRACE, DEBUG, INFO, WARN, ERROR, FATAL

@@ -12,6 +12,7 @@ add_executable(test_dag
     ${PROJECT_SOURCE_DIR}/src/core/ethash.cpp
     ${PROJECT_SOURCE_DIR}/src/core/keccak.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/dag_kernel.cu
 )
 
 add_executable(test_stratum
@@ -20,6 +21,8 @@ add_executable(test_stratum
     ${PROJECT_SOURCE_DIR}/src/network/connection.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/hex_utils.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/ethash.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/keccak.cpp
 )
 
 add_executable(test_hex_utils
@@ -28,7 +31,7 @@ add_executable(test_hex_utils
 )
 
 target_link_libraries(test_ethash PRIVATE Threads::Threads)
-target_link_libraries(test_dag PRIVATE Threads::Threads)
+target_link_libraries(test_dag PRIVATE Threads::Threads ${CUDA_LIBRARIES})
 target_link_libraries(test_stratum PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 
 target_include_directories(test_ethash PRIVATE ${PROJECT_SOURCE_DIR}/include)

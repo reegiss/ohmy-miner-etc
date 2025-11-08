@@ -1,6 +1,7 @@
 #include "ohmy/stratum_client.hpp"
 #include "ohmy/logger.hpp"
 #include "ohmy/hex_utils.hpp"
+#include "ohmy/ethash.hpp" // for epochFromSeedHash
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <sys/socket.h>
@@ -10,6 +11,8 @@
 #include <fcntl.h>
 #include <cstring>
 #include <cerrno>
+#include <cinttypes>  // for PRIx64
+#include <cmath>       // for std::round
 
 using json = nlohmann::json;
 
@@ -24,6 +27,7 @@ public:
         , connected_(false)
         , socket_(-1)
         , messageId_(1)
+        , currentDifficulty_(0xFFFFFFFFFFFFFFFF)
     {}
 
     ~Impl() {
@@ -149,6 +153,7 @@ public:
         if (!workerName.empty()) {
             worker += "." + workerName;
         }
+        currentWorker_ = worker; // remember for submissions
         
         // Construct mining.authorize message
         json message = {
@@ -177,6 +182,44 @@ public:
             json resp = json::parse(response);
             if (resp.contains("result") && resp["result"].get<bool>()) {
                 LOG_INFO("Authorization successful!");
+                // Optionally, suggest a lower difficulty if env var is set (for faster share rate while debugging)
+                const char* suggestEnv = std::getenv("OHMY_SUGGEST_DIFF");
+                if (suggestEnv) {
+                    uint64_t sug = std::strtoull(suggestEnv, nullptr, 10);
+                    if (sug > 0) {
+                        json suggest = {
+                            {"id", messageId_++},
+                            {"method", "mining.suggest_difficulty"},
+                            {"params", {sug}}
+                        };
+                        std::string smsg = suggest.dump() + "\n";
+                        LOG_INFO("Suggesting difficulty to pool: " + std::to_string(sug));
+                        sendMessage(smsg);
+                        // We don't expect a response; pool may ignore or later issue mining.set_difficulty
+                    }
+                }
+                return true;
+            } else if (resp.contains("method") && resp["method"].get<std::string>() == "mining.notify") {
+                // Some pools send mining.notify immediately after authorization instead of a result
+                LOG_INFO("Authorization response contains mining.notify - treating as successful");
+                // Process this notification
+                processNotification(resp);
+                
+                // Suggest difficulty if requested
+                const char* suggestEnv = std::getenv("OHMY_SUGGEST_DIFF");
+                if (suggestEnv) {
+                    uint64_t sug = std::strtoull(suggestEnv, nullptr, 10);
+                    if (sug > 0) {
+                        json suggest = {
+                            {"id", messageId_++},
+                            {"method", "mining.suggest_difficulty"},
+                            {"params", {sug}}
+                        };
+                        std::string smsg = suggest.dump() + "\n";
+                        LOG_INFO("Suggesting difficulty to pool: " + std::to_string(sug));
+                        sendMessage(smsg);
+                    }
+                }
                 return true;
             } else {
                 LOG_ERROR("Authorization failed");
@@ -191,20 +234,33 @@ public:
     bool submitSolution(const Solution& solution) {
         if (!connected_) return false;
         
-        // Convert solution to hex strings
-        std::stringstream nonceHex;
-        nonceHex << "0x" << std::hex << solution.nonce;
+        // Format nonce as 16-char hex string (no 0x prefix)
+        char nonceBuf[17];
+        std::snprintf(nonceBuf, sizeof(nonceBuf), "%016" PRIx64, solution.nonce);
         
-        // Construct mining.submit message
+        // Use jobId from solution (to avoid stale shares)
+        std::string jobId = solution.jobId.empty() ? currentJob_.jobId : solution.jobId;
+        
+        // Convert mixHash to hex string
+        std::string mixHashHex = utils::HexUtils::hash32ToHex(solution.mixHash, true); // with 0x prefix
+        
+        // Get header from current job
+        std::string headerHex = utils::HexUtils::hash32ToHex(currentJob_.headerHash, true); // with 0x prefix
+        
+        // Log solution details for debugging
+        LOG_DEBUG("Submitting: nonce=0x" + std::string(nonceBuf) + 
+                  " mixHash=" + mixHashHex.substr(0, 18) + "... job=" + jobId);
+        
+        // Ethash Stratum expects 5 params: [worker, jobId, nonce, headerHash, mixHash]
         json message = {
             {"id", messageId_++},
             {"method", "mining.submit"},
             {"params", {
-                walletAddress_,           // worker name
-                currentJob_.jobId,        // job id
-                nonceHex.str(),           // nonce
-                currentJob_.headerHash,   // header hash
-                "0x0"                     // mix hash (TODO: calculate actual)
+                currentWorker_.empty() ? walletAddress_ : currentWorker_,
+                jobId,
+                std::string(nonceBuf),  // 16 hex chars, no 0x
+                headerHex,              // header hash with 0x prefix  
+                mixHashHex              // mix hash with 0x prefix
             }}
         };
         
@@ -222,11 +278,28 @@ public:
             
             try {
                 json resp = json::parse(response);
-                if (resp.contains("result") && resp["result"].get<bool>()) {
+                if (resp.contains("result") && resp["result"].is_boolean() && resp["result"].get<bool>()) {
                     LOG_INFO("✓ Share accepted!");
                     return true;
                 } else {
-                    LOG_ERROR("✗ Share rejected");
+                    if (resp.contains("error") && !resp["error"].is_null()) {
+                        try {
+                            auto err = resp["error"];
+                            int code = -1; std::string msg;
+                            if (err.is_array() && err.size() >= 2) {
+                                code = err[0].get<int>();
+                                msg = err[1].get<std::string>();
+                            } else if (err.is_object()) {
+                                code = err.value("code", -1);
+                                msg = err.value("message", std::string(""));
+                            }
+                            LOG_ERROR("✗ Share rejected (" + std::to_string(code) + "): " + msg);
+                        } catch (...) {
+                            LOG_ERROR("✗ Share rejected (unparsed error)");
+                        }
+                    } else {
+                        LOG_ERROR("✗ Share rejected");
+                    }
                 }
             } catch (const json::exception& e) {
                 LOG_ERROR("Failed to parse submit response: " + std::string(e.what()));
@@ -279,20 +352,87 @@ public:
         buffer[received] = '\0';
         std::string message(buffer, received);
         
-        // Parse and process JSON message
-        try {
-            json msg = json::parse(message);
-            
-            // Check if it's a notification (has "method" field)
-            if (msg.contains("method")) {
-                processNotification(msg);
-                return true;
+        // Parse JSON messages - can be multiple per line or split across lines
+        // Strategy: Try to parse JSON objects one by one from the buffer
+        bool processed = false;
+        size_t pos = 0;
+        
+        while (pos < message.length()) {
+            // Skip whitespace and newlines
+            while (pos < message.length() && (message[pos] == ' ' || message[pos] == '\n' || message[pos] == '\r')) {
+                pos++;
             }
-        } catch (const json::exception& e) {
-            LOG_ERROR("Failed to parse message: " + std::string(e.what()));
+            
+            if (pos >= message.length()) break;
+            
+            // Find the start of a JSON object
+            if (message[pos] != '{') {
+                pos++;
+                continue;
+            }
+            
+            // Find the matching closing brace
+            int braceCount = 0;
+            size_t jsonStart = pos;
+            size_t jsonEnd = pos;
+            bool inString = false;
+            bool escaped = false;
+            
+            while (jsonEnd < message.length()) {
+                char c = message[jsonEnd];
+                
+                if (escaped) {
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    inString = !inString;
+                } else if (!inString) {
+                    if (c == '{') {
+                        braceCount++;
+                    } else if (c == '}') {
+                        braceCount--;
+                        if (braceCount == 0) {
+                            jsonEnd++;
+                            break;
+                        }
+                    }
+                }
+                jsonEnd++;
+            }
+            
+            if (braceCount != 0) {
+                // Incomplete JSON, wait for more data
+                break;
+            }
+            
+            // Extract and parse the JSON object
+            std::string jsonStr = message.substr(jsonStart, jsonEnd - jsonStart);
+            
+            try {
+                json msg = json::parse(jsonStr);
+                
+                LOG_DEBUG("Parsed JSON with " + std::to_string(jsonStr.length()) + " bytes");
+                LOG_DEBUG("Full JSON: " + jsonStr);
+                
+                // Check if it's a notification (has "method" field)
+                if (msg.contains("method")) {
+                    LOG_DEBUG("Found method field, processing notification...");
+                    processNotification(msg);
+                    processed = true;
+                } else if (msg.contains("result") || msg.contains("error")) {
+                    // This is a response to our previous request
+                    LOG_DEBUG("Found result/error field, response: " + jsonStr.substr(0, 200));
+                }
+            } catch (const json::exception& e) {
+                LOG_ERROR("Failed to parse message: " + std::string(e.what()));
+                LOG_ERROR("Message was: " + jsonStr.substr(0, 100));
+            }
+            
+            pos = jsonEnd;
         }
         
-        return false;
+        return processed;
     }
 
 private:
@@ -326,68 +466,110 @@ private:
         }
         
         buffer[received] = '\0';
-        return std::string(buffer, received);
+        std::string msg(buffer, received);
+        if (!msg.empty()) {
+            LOG_INFO("← Received: " + msg.substr(0, 200) + (msg.length() > 200 ? "..." : ""));
+        }
+        return msg;
     }
     
     void processNotification(const json& message) {
         try {
             std::string method = message["method"].get<std::string>();
+            LOG_INFO("📨 Processing notification: " + method);
             
             if (method == "mining.notify") {
                 // Parse mining.notify message
-                // Params: [jobId, prevHash, coinbase1, coinbase2, merkleBranch, version, nBits, nTime, cleanJobs]
+                // For Ethash pools (like 2miners), format is:
+                // Params: [jobId, seedHash, headerHash, cleanJobs]
                 const auto& params = message["params"];
                 
-                if (params.size() >= 8) {
+                LOG_INFO("mining.notify params size: " + std::to_string(params.size()));
+                for (size_t i = 0; i < params.size(); i++) {
+                    LOG_INFO("  param[" + std::to_string(i) + "]: " + params[i].dump().substr(0, 60));
+                }
+                
+                if (params.size() >= 3) {
                     MiningJob job;
                     job.jobId = params[0].get<std::string>();
                     
-                    // Parse hex strings to hash32_t
-                    std::string headerHashHex = params[1].get<std::string>();
-                    std::string seedHashHex = params[2].is_string() ? params[2].get<std::string>() : "";
-                    std::string targetHex = params[6].get<std::string>();
+                    LOG_INFO("Job ID: " + job.jobId);
+                    
+                    // Parse hex strings - Ethash format
+                    std::string seedHashHex = params[1].get<std::string>();
+                    std::string headerHashHex = params[2].get<std::string>();
+                    
+                    LOG_INFO("Seed: " + seedHashHex);
+                    LOG_INFO("Header: " + headerHashHex.substr(0, 20) + "...");
                     
                     // Convert hex strings using HexUtils
                     if (!utils::HexUtils::hexToHash32(headerHashHex, job.headerHash)) {
                         LOG_WARN("Failed to parse header hash: " + headerHashHex);
                     }
                     
-                    if (!seedHashHex.empty()) {
-                        if (!utils::HexUtils::hexToHash32(seedHashHex, job.seedHash)) {
-                            LOG_WARN("Failed to parse seed hash: " + seedHashHex);
-                        }
+                    if (!utils::HexUtils::hexToHash32(seedHashHex, job.seedHash)) {
+                        LOG_WARN("Failed to parse seed hash: " + seedHashHex);
                     }
                     
-                    if (!utils::HexUtils::hexToUint64(targetHex, job.target)) {
-                        LOG_WARN("Failed to parse target: " + targetHex);
-                        job.target = 0xFFFFFFFFFFFFFFFF; // Default high target
+                    // Derive epoch from seed hash if possible
+                    uint32_t derivedEpoch = Ethash::epochFromSeedHash(job.seedHash);
+                    if (derivedEpoch == UINT32_MAX) {
+                        LOG_WARN("Failed to derive epoch from seed hash; defaulting to 0");
+                        derivedEpoch = 0;
                     }
-                    
-                    job.blockNumber = 0;  // Will be set from pool if provided
-                    job.epoch = 0;
+                    job.epoch = derivedEpoch;
+                    job.blockNumber = derivedEpoch * 30000; // approximate lower bound
+                    // Use current difficulty as target (will be converted externally to 256-bit boundary)
+                    job.target = currentDifficulty_;
                     
                     // Clean jobs flag
-                    bool cleanJobs = params.size() > 8 ? params[8].get<bool>() : false;
+                    bool cleanJobs = params.size() > 3 ? params[3].get<bool>() : true;
                     
                     currentJob_ = job;
                     
-                    LOG_INFO("New mining job received: " + job.jobId);
-                    LOG_DEBUG("  Header hash: " + headerHashHex.substr(0, 16) + "...");
-                    LOG_DEBUG("  Target: 0x" + std::to_string(job.target));
+                    LOG_INFO("✓ New mining job received: " + job.jobId);
                     
                     if (onJob_) {
+                        LOG_INFO("Calling onJob callback...");
                         onJob_(job);
+                    } else {
+                        LOG_WARN("onJob callback is not set!");
                     }
+                } else {
+                    LOG_WARN("mining.notify has too few params: " + std::to_string(params.size()));
                 }
             } else if (method == "mining.set_difficulty") {
                 // Parse difficulty change
                 const auto& params = message["params"];
+                LOG_INFO("📊 mining.set_difficulty received with " + std::to_string(params.size()) + " params");
                 if (params.size() >= 1) {
-                    uint64_t difficulty = params[0].get<uint64_t>();
-                    LOG_INFO("Difficulty changed to: " + std::to_string(difficulty));
+                    LOG_INFO("   Raw param[0]: " + params[0].dump());
+                    
+                    // Difficulty can come as integer or floating point
+                    uint64_t difficulty = 0;
+                    if (params[0].is_number_integer()) {
+                        difficulty = params[0].get<uint64_t>();
+                    } else if (params[0].is_number_float()) {
+                        double diffDouble = params[0].get<double>();
+                        difficulty = static_cast<uint64_t>(std::round(diffDouble));
+                    } else {
+                        LOG_WARN("Unexpected difficulty type: " + std::string(params[0].type_name()));
+                        difficulty = 1; // fallback
+                    }
+                    
+                    currentDifficulty_ = difficulty;
+                    // Convert difficulty -> 64-bit target approximation: max64/difficulty
+                    // This is a simplification; proper Ethash uses 256-bit boundary.
+                    uint64_t target64 = difficulty > 0 ? (std::numeric_limits<uint64_t>::max() / difficulty) : std::numeric_limits<uint64_t>::max();
+                    currentJob_.target = target64;
+                    LOG_INFO("✓ Difficulty set to: " + std::to_string(difficulty));
+                    LOG_INFO("   Target64 (approximate): " + std::to_string(target64));
                     
                     if (onDifficulty_) {
+                        LOG_INFO("   Calling onDifficulty callback with diff=" + std::to_string(difficulty));
                         onDifficulty_(difficulty);
+                    } else {
+                        LOG_WARN("   onDifficulty callback is not set!");
                     }
                 }
             }
@@ -401,10 +583,12 @@ private:
     bool connected_;
     int socket_;
     uint64_t messageId_;
+    uint64_t currentDifficulty_;
     std::string subscriptionId_;
     MiningJob currentJob_;
     OnJobCallback onJob_;
     OnDifficultyCallback onDifficulty_;
+    std::string currentWorker_;
 };
 
 // StratumClient implementation

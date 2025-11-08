@@ -1,8 +1,11 @@
 #include "ohmy/device_manager.hpp"
 #include "ohmy/logger.hpp"
 #include <cuda_runtime.h>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
+#include <sstream>
+#include <iomanip>
 
 namespace ohmy {
 namespace cuda {
@@ -17,15 +20,23 @@ namespace cuda {
         } \
     } while(0)
 
+// Struct matching the device-side solution layout (POD)
+struct DeviceSolution {
+    uint64_t nonce;
+    uint8_t mixHash[32];
+    uint8_t result[32];
+};
+
 // Forward declaration of kernel launch function
 extern "C" void launch_ethash_search(
     const uint64_t* d_dag,
     uint64_t dagSize,
     const uint32_t* d_header,
-    uint64_t target,
+    const uint32_t* d_seedHash,
+    const uint8_t* d_targetBE,
     uint64_t startNonce,
     uint64_t searchCount,
-    uint64_t* d_solutions,
+    DeviceSolution* d_solutions,
     uint32_t* d_solutionCount,
     uint32_t maxSolutions,
     cudaStream_t stream
@@ -41,6 +52,7 @@ public:
         // Initialize member variables
         d_dag_ = nullptr;
         d_header_ = nullptr;
+        d_seedHash_ = nullptr;
         d_solutions_ = nullptr;
         d_solutionCount_ = nullptr;
         dagSize_ = 0;
@@ -100,13 +112,36 @@ public:
         LOG_INFO("Copying DAG to GPU (" + std::to_string(dagSize / (1024*1024)) + " MB)");
         CUDA_CHECK(cudaMemcpy(d_dag_, dag, dagSize, cudaMemcpyHostToDevice));
         
-        // Allocate device memory for header
-        CUDA_CHECK(cudaMalloc(&d_header_, 32));  // 32 bytes for header
+        // Verify DAG was loaded (log first 32 bytes and item 8)
+        {
+            const uint64_t* dagHost = static_cast<const uint64_t*>(dag);
+            std::stringstream ss;
+            ss << "DAG item 0: " << std::hex;
+            for (int i = 0; i < 4; i++) {
+                ss << " 0x" << std::setw(16) << std::setfill('0') << dagHost[i];
+            }
+            LOG_INFO(ss.str());
+            
+            // Also log DAG item 1 (starts at offset 8 uint64s)
+            ss.str("");
+            ss << "DAG item 1: " << std::hex;
+            for (int i = 0; i < 4; i++) {
+                ss << " 0x" << std::setw(16) << std::setfill('0') << dagHost[8 + i];
+            }
+            LOG_INFO(ss.str());
+        }
         
-        // Allocate solution buffers
+        // Allocate device memory for header and seedHash
+        CUDA_CHECK(cudaMalloc(&d_header_, 32));    // 32 bytes for header
+        CUDA_CHECK(cudaMalloc(&d_seedHash_, 32));  // 32 bytes for seedHash
+        
+    // Allocate solution buffers - now complete Solution structures (device POD)
         const uint32_t maxSolutions = 16;
-        CUDA_CHECK(cudaMalloc(&d_solutions_, maxSolutions * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_solutions_, maxSolutions * sizeof(DeviceSolution)));
         CUDA_CHECK(cudaMalloc(&d_solutionCount_, sizeof(uint32_t)));
+
+        // Allocate device memory for 256-bit target (big-endian)
+        CUDA_CHECK(cudaMalloc(&d_target_, 32));
         
         // Create CUDA stream for async operations
         CUDA_CHECK(cudaStreamCreate(&stream_));
@@ -121,7 +156,8 @@ public:
 
     uint32_t search(
         const hash32_t& headerHash,
-        uint64_t target,
+        const hash32_t& seedHash,
+        const uint8_t targetBE[32],
         uint64_t startNonce,
         uint64_t count,
         std::vector<Solution>& solutions
@@ -132,8 +168,10 @@ public:
         uint32_t zero = 0;
         CUDA_CHECK(cudaMemcpy(d_solutionCount_, &zero, sizeof(uint32_t), cudaMemcpyHostToDevice));
         
-        // Copy header to device
+        // Copy header, seedHash and target to device
         CUDA_CHECK(cudaMemcpy(d_header_, headerHash.data(), 32, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_seedHash_, seedHash.data(), 32, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_target_, targetBE, 32, cudaMemcpyHostToDevice));
         
         // Start timing
         CUDA_CHECK(cudaEventRecord(startEvent_, stream_));
@@ -143,7 +181,8 @@ public:
             reinterpret_cast<const uint64_t*>(d_dag_),
             dagSize_,
             reinterpret_cast<const uint32_t*>(d_header_),
-            target,
+            reinterpret_cast<const uint32_t*>(d_seedHash_),
+            reinterpret_cast<const uint8_t*>(d_target_),
             startNonce,
             count,
             d_solutions_,
@@ -168,9 +207,7 @@ public:
         
         // Calculate current hashrate (MH/s)
         float currentHashrate = (count / 1000000.0f) / (milliseconds / 1000.0f);
-        LOG_INFO("Searched " + std::to_string(count) + " nonces in " + 
-                 std::to_string(milliseconds) + " ms (" + 
-                 std::to_string(currentHashrate) + " MH/s)");
+        // LOG_INFO removed to reduce log frequency
         
         // Get solution count
         uint32_t numSolutions = 0;
@@ -180,19 +217,18 @@ public:
             // Limit to maxSolutions
             numSolutions = std::min(numSolutions, maxSolutions);
             
-            // Copy solutions from device
-            std::vector<uint64_t> nonces(numSolutions);
-            CUDA_CHECK(cudaMemcpy(nonces.data(), d_solutions_, 
-                                 numSolutions * sizeof(uint64_t), cudaMemcpyDeviceToHost));
-            
-            // Convert to Solution structs
+            // Copy complete solutions from device POD to host Solution objects
+            std::vector<DeviceSolution> tmp(numSolutions);
+            CUDA_CHECK(cudaMemcpy(tmp.data(), d_solutions_,
+                                 numSolutions * sizeof(DeviceSolution), cudaMemcpyDeviceToHost));
+            solutions.clear();
+            solutions.reserve(numSolutions);
             for (uint32_t i = 0; i < numSolutions; ++i) {
                 Solution sol;
-                sol.nonce = nonces[i];
-                // TODO: Calculate actual mixHash and result
-                sol.mixHash.fill(0);
-                sol.result.fill(0);
-                solutions.push_back(sol);
+                sol.nonce = tmp[i].nonce;
+                std::memcpy(sol.mixHash.data(), tmp[i].mixHash, 32);
+                std::memcpy(sol.result.data(),  tmp[i].result,  32);
+                solutions.push_back(std::move(sol));
             }
             
             LOG_INFO("Found " + std::to_string(numSolutions) + " solution(s)!");
@@ -224,6 +260,10 @@ private:
             cudaFree(d_header_);
             d_header_ = nullptr;
         }
+        if (d_seedHash_) {
+            cudaFree(d_seedHash_);
+            d_seedHash_ = nullptr;
+        }
         if (d_solutions_) {
             cudaFree(d_solutions_);
             d_solutions_ = nullptr;
@@ -231,6 +271,10 @@ private:
         if (d_solutionCount_) {
             cudaFree(d_solutionCount_);
             d_solutionCount_ = nullptr;
+        }
+        if (d_target_) {
+            cudaFree(d_target_);
+            d_target_ = nullptr;
         }
         if (stream_) {
             cudaStreamDestroy(stream_);
@@ -249,8 +293,10 @@ private:
     // Device memory pointers
     void* d_dag_;
     void* d_header_;
-    uint64_t* d_solutions_;
+    void* d_seedHash_;       // Seed hash from mining job
+    DeviceSolution* d_solutions_; // Device-side POD solutions
     uint32_t* d_solutionCount_;
+    void* d_target_;
     size_t dagSize_;
     cudaStream_t stream_;
     
@@ -278,12 +324,13 @@ bool DeviceManager::initDevice(int deviceId, const void* dag, size_t dagSize) {
 
 uint32_t DeviceManager::search(
     const hash32_t& headerHash,
-    uint64_t target,
+    const hash32_t& seedHash,
+    const uint8_t targetBE[32],
     uint64_t startNonce,
     uint64_t count,
     std::vector<Solution>& solutions
 ) {
-    return pImpl_->search(headerHash, target, startNonce, count, solutions);
+    return pImpl_->search(headerHash, seedHash, targetBE, startNonce, count, solutions);
 }
 
 uint64_t DeviceManager::getHashRate(int deviceId) const {

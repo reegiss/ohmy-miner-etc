@@ -3,6 +3,7 @@
 #include <iostream>
 #include <chrono>
 #include <vector>
+#include <cstring>
 
 using namespace ohmy;
 using namespace ohmy::cuda;
@@ -65,7 +66,8 @@ void benchmark_hashrate() {
     hash32_t headerHash;
     headerHash.fill(0xAB);
     
-    uint64_t target = 0xFFFFFFFFFFFFFFFFULL;  // Very easy target
+    uint8_t targetBE[32];
+    std::memset(targetBE, 0xFF, sizeof(targetBE));  // Very easy target (max)
     uint64_t startNonce = 0;
     
     // Test different batch sizes
@@ -80,7 +82,11 @@ void benchmark_hashrate() {
         
         auto start = std::chrono::high_resolution_clock::now();
         
-        manager.search(headerHash, target, startNonce, batchSize, solutions);
+    // Create dummy seedHash for testing
+    ohmy::hash32_t seedHash;
+    seedHash.fill(0x42);
+    
+    manager.search(headerHash, seedHash, targetBE, startNonce, batchSize, solutions);
         
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -89,8 +95,8 @@ void benchmark_hashrate() {
         double seconds = duration.count() / 1000000.0;
         double hashrate = (batchSize / 1000000.0) / seconds;  // MH/s
         
-        printf("| %10llu | %9.2f | %15.2f | %10.0f |\n", 
-               batchSize, milliseconds, hashrate, batchSize / seconds);
+     printf("| %10lu | %9.2f | %15.2f | %10.0f |\n", 
+         static_cast<unsigned long>(batchSize), milliseconds, hashrate, batchSize / seconds);
     }
     
     std::cout << std::string(70, '=') << std::endl;
