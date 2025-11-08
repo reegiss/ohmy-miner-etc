@@ -40,9 +40,10 @@ add_executable(bench_cuda
     benchmark/bench_cuda_kernels.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
     ${PROJECT_SOURCE_DIR}/src/cuda/device_manager.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel.cu
 )
 
-target_link_libraries(bench_ethash PRIVATE Threads::Threads)
+target_link_libraries(bench_cuda PRIVATE ${CUDA_LIBRARIES} Threads::Threads)
 target_link_libraries(bench_cuda PRIVATE ${CUDA_LIBRARIES} Threads::Threads)
 
 target_include_directories(bench_ethash PRIVATE ${PROJECT_SOURCE_DIR}/include)
