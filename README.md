@@ -57,6 +57,19 @@ cmake .. -DBUILD_DOCS=ON
 
 ## Usage
 
+### Quick Test with 2miners
+
+```bash
+# Use the provided test script
+./test_2miners.sh
+
+# Or manually:
+./build/src/ohmy-miner-etc \
+  --pool etc.2miners.com:1010 \
+  --wallet 0xe3c52bab8907c03b8305f9cd21d48a320de439b7 \
+  --worker test-rig
+```
+
 ### Basic Usage
 
 ```bash
