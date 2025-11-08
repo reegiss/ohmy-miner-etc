@@ -1,25 +1,112 @@
 #include "ohmy/ethash.hpp"
-#include <cassert>
+#include "ohmy/keccak.hpp"
 #include <iostream>
+#include <cassert>
+#include <iomanip>
+#include <sstream>
 
 using namespace ohmy;
 
+// Helper to convert hex string to bytes
+std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
+    std::vector<uint8_t> bytes;
+    for (size_t i = 0; i < hex.length(); i += 2) {
+        std::string byteString = hex.substr(i, 2);
+        uint8_t byte = static_cast<uint8_t>(strtol(byteString.c_str(), nullptr, 16));
+        bytes.push_back(byte);
+    }
+    return bytes;
+}
+
+// Helper to convert bytes to hex string
+std::string bytes_to_hex(const uint8_t* data, size_t len) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < len; ++i) {
+        ss << std::setw(2) << static_cast<int>(data[i]);
+    }
+    return ss.str();
+}
+
+void test_keccak256_empty() {
+    // Test vector: Keccak-256("") 
+    // Expected: c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
+    const char* input = "";
+    auto result = Keccak::keccak256(reinterpret_cast<const uint8_t*>(input), 0);
+    
+    std::string expected = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470";
+    std::string actual = bytes_to_hex(result.data(), 32);
+    
+    if (actual != expected) {
+        std::cerr << "✗ Keccak-256 empty string test FAILED\n";
+        std::cerr << "  Expected: " << expected << "\n";
+        std::cerr << "  Got:      " << actual << "\n";
+        assert(false);
+    }
+    std::cout << "✓ Keccak-256 empty string test passed\n";
+}
+
+void test_keccak256_short() {
+    // Test vector: Keccak-256("abc")
+    // Expected: 4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45
+    const char* input = "abc";
+    auto result = Keccak::keccak256(reinterpret_cast<const uint8_t*>(input), 3);
+    
+    std::string expected = "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45";
+    std::string actual = bytes_to_hex(result.data(), 32);
+    
+    if (actual != expected) {
+        std::cerr << "✗ Keccak-256 'abc' test FAILED\n";
+        std::cerr << "  Expected: " << expected << "\n";
+        std::cerr << "  Got:      " << actual << "\n";
+        assert(false);
+    }
+    std::cout << "✓ Keccak-256 'abc' test passed\n";
+}
+
+void test_keccak256_ethereum() {
+    // Test vector from Ethereum: Keccak-256("testing")
+    // Expected: 5f16f4c7f149ac4f9510d9cf8cf384038ad348b3bcdc01915f95de12df9d1b02
+    const char* input = "testing";
+    auto result = Keccak::keccak256(reinterpret_cast<const uint8_t*>(input), 7);
+    
+    std::string expected = "5f16f4c7f149ac4f9510d9cf8cf384038ad348b3bcdc01915f95de12df9d1b02";
+    std::string actual = bytes_to_hex(result.data(), 32);
+    
+    if (actual != expected) {
+        std::cerr << "✗ Keccak-256 'testing' test FAILED\n";
+        std::cerr << "  Expected: " << expected << "\n";
+        std::cerr << "  Got:      " << actual << "\n";
+        assert(false);
+    }
+    std::cout << "✓ Keccak-256 'testing' test passed\n";
+}
+
+void test_keccak512() {
+    // Test vector: Keccak-512("abc")
+    // Expected: 18587dc2ea106b9a1563e32b3312421ca164c7f1f07bc922a9c83d77cea3a1e5d0c69910739025372dc14ac9642629379540c17e2a65b19d77aa511a9d00bb96
+    const char* input = "abc";
+    auto result = Keccak::keccak512(reinterpret_cast<const uint8_t*>(input), 3);
+    
+    std::string expected = "18587dc2ea106b9a1563e32b3312421ca164c7f1f07bc922a9c83d77cea3a1e5"
+                          "d0c69910739025372dc14ac9642629379540c17e2a65b19d77aa511a9d00bb96";
+    std::string actual = bytes_to_hex(result.data(), 64);
+    
+    if (actual != expected) {
+        std::cerr << "✗ Keccak-512 'abc' test FAILED\n";
+        std::cerr << "  Expected: " << expected << "\n";
+        std::cerr << "  Got:      " << actual << "\n";
+        assert(false);
+    }
+    std::cout << "✓ Keccak-512 'abc' test passed\n";
+}
+
 void test_epoch_calculation() {
-    std::cout << "Testing epoch calculation..." << std::endl;
-    
-    // Block 0 should be epoch 0
     assert(Ethash::getEpoch(0) == 0);
-    
-    // Block 29999 should be epoch 0
     assert(Ethash::getEpoch(29999) == 0);
-    
-    // Block 30000 should be epoch 1
     assert(Ethash::getEpoch(30000) == 1);
-    
-    // Block 60000 should be epoch 2
     assert(Ethash::getEpoch(60000) == 2);
-    
-    std::cout << "✓ Epoch calculation tests passed" << std::endl;
+    std::cout << "✓ Epoch calculation tests passed\n";
 }
 
 void test_dataset_size() {
@@ -55,6 +142,17 @@ void test_cache_size() {
 }
 
 int main() {
+    std::cout << "\n=== Running Keccak Unit Tests ===" << std::endl;
+    try {
+        test_keccak256_empty();
+        test_keccak256_short();
+        test_keccak256_ethereum();
+        test_keccak512();
+    } catch (const std::exception& e) {
+        std::cerr << "\n✗ Keccak test failed: " << e.what() << std::endl;
+        return 1;
+    }
+    
     std::cout << "\n=== Running Ethash Unit Tests ===" << std::endl;
     
     try {
@@ -62,7 +160,7 @@ int main() {
         test_dataset_size();
         test_cache_size();
         
-        std::cout << "\n✓ All Ethash tests passed!" << std::endl;
+        std::cout << "\n✅ All tests passed!" << std::endl;
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "\n✗ Test failed: " << e.what() << std::endl;

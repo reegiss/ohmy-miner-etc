@@ -2,6 +2,7 @@
 add_executable(test_ethash
     unit/test_ethash.cpp
     ${PROJECT_SOURCE_DIR}/src/core/ethash.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/keccak.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
 )
 
@@ -9,6 +10,7 @@ add_executable(test_dag
     unit/test_dag.cpp
     ${PROJECT_SOURCE_DIR}/src/dag/dag_generator.cpp
     ${PROJECT_SOURCE_DIR}/src/core/ethash.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/keccak.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
 )
 
@@ -30,12 +32,14 @@ target_include_directories(test_stratum PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_executable(bench_ethash
     benchmark/bench_ethash.cpp
     ${PROJECT_SOURCE_DIR}/src/core/ethash.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/keccak.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
 )
 
 add_executable(bench_cuda
     benchmark/bench_cuda_kernels.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/device_manager.cu
 )
 
 target_link_libraries(bench_ethash PRIVATE Threads::Threads)

@@ -3,6 +3,7 @@ set(SOURCES
     main.cpp
     core/miner.cpp
     core/ethash.cpp
+    core/keccak.cpp
     network/stratum_client.cpp
     network/connection.cpp
     dag/dag_generator.cpp
