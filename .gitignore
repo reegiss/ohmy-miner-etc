@@ -1,0 +1,73 @@
+# Build directories
+build/
+cmake-build-*/
+*.o
+*.so
+*.a
+*.dylib
+*.dll
+
+# Executables
+ohmy-miner-etc
+unit_tests
+benchmark_tests
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+!cmake/*.cmake
+
+# CUDA
+*.fatbin
+*.cubin
+*.ptx
+
+# Logs
+*.log
+logs/
+
+# DAG cache
+dag-cache/
+*.bin
+
+# Dependencies
+third_party/
+vendor/
+
+# Generated documentation
+docs/html/
+docs/latex/
+docs/build/
+
+# Package files
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+
+# Test results
+Testing/
+test_results/
+
+# Profiling
+*.nvvp
+*.qdrep
+*.ncu-rep
+*.nsys-rep
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
