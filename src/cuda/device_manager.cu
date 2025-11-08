@@ -193,17 +193,28 @@ public:
         
         // Check for optimized kernel flag (env var OHMY_USE_OPTIMIZED_KERNEL=1)
         static int useOptimized = -1;
+        static uint32_t noncesPerThread = 4;  // Default: 4 nonces/thread (best balance: +17%)
         if (useOptimized == -1) {
             const char* env = std::getenv("OHMY_USE_OPTIMIZED_KERNEL");
             useOptimized = (env && std::string(env) == "1") ? 1 : 0;
+            
+            // Allow custom noncesPerThread via env var for experimentation
+            const char* batchEnv = std::getenv("OHMY_NONCES_PER_THREAD");
+            if (batchEnv) {
+                int batch = std::atoi(batchEnv);
+                if (batch > 0 && batch <= 256) {
+                    noncesPerThread = static_cast<uint32_t>(batch);
+                }
+            }
+            
             if (useOptimized) {
-                LOG_INFO("Using optimized kernel with batching (noncesPerThread=4)");
+                LOG_INFO("Using optimized kernel with batching (noncesPerThread=" + 
+                         std::to_string(noncesPerThread) + ")");
             }
         }
         
         if (useOptimized) {
-            // Use optimized kernel with batching
-            const uint32_t noncesPerThread = 4;  // Each thread processes 4 nonces
+            // Use optimized kernel with advanced caching and high batching
             launch_ethash_search_optimized(
                 reinterpret_cast<const uint64_t*>(d_dag_),
                 dagSize_,

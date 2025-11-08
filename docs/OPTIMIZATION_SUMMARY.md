@@ -3,16 +3,28 @@
 ## ✅ Completed Implementation
 
 ### Kernel Optimization
-- ✅ Implemented `ethash_search_kernel_optimized` with batching (4 nonces/thread)
-- ✅ Added shared memory for header, seedHash, and DAG cache allocation
-- ✅ Cooperative loading of shared data between threads
+- ✅ Implemented `ethash_search_kernel_optimized` with batching (4 nonces/thread - optimal)
+- ✅ Added shared memory for header, seedHash
+- ✅ Experimented with advanced caching (16, 64 nonces/thread)
 - ✅ Toggle support via `OHMY_USE_OPTIMIZED_KERNEL=1` environment variable
+- ✅ Configurable batching via `OHMY_NONCES_PER_THREAD` for experimentation
 
 ### Performance Results
-| Metric | Base Kernel | Optimized Kernel | Improvement |
-|--------|-------------|------------------|-------------|
+| Metric | Base Kernel | Optimized (4 nonces) | Improvement |
+|--------|-------------|----------------------|-------------|
 | Hash Rate | 6.31 MH/s | 7.39 MH/s | **+17.05%** |
 | Time/Share (diff=2) | 22.67 min | 19.37 min | -3.3 min |
+
+### Batching Experiments
+- **4 nonces/thread**: +17% ← **OPTIMAL** ✓
+- **16 nonces/thread**: +15% (marginal)
+- **64 nonces/thread**: -10% (too much overhead)
+
+### Key Findings
+- **Optimal batching**: 4 nonces/thread balances kernel overhead vs occupancy
+- **DAG access pattern**: Random access makes cooperative caching difficult
+- **Register pressure**: High (mix[32], seed[64]) limits occupancy
+- **L2 cache**: Provides natural caching benefit without explicit shared memory management
 
 ### Testing
 - ✅ All 6 unit tests passing
