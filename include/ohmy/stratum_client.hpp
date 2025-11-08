@@ -53,6 +53,12 @@ public:
     bool submitSolution(const Solution& solution);
 
     /**
+     * @brief Process incoming messages from pool (non-blocking)
+     * @return true if messages were processed
+     */
+    bool processMessages();
+
+    /**
      * @brief Set callback for new mining jobs
      */
     void setOnJob(OnJobCallback callback);

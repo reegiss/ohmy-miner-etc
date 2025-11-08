@@ -17,6 +17,7 @@ add_executable(test_dag
 add_executable(test_stratum
     unit/test_stratum.cpp
     ${PROJECT_SOURCE_DIR}/src/network/stratum_client.cpp
+    ${PROJECT_SOURCE_DIR}/src/network/connection.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
 )
 
