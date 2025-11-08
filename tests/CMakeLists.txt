@@ -39,6 +39,8 @@ add_executable(bench_ethash
 add_executable(bench_cuda
     benchmark/bench_cuda_kernels.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/ethash.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/keccak.cpp
     ${PROJECT_SOURCE_DIR}/src/cuda/device_manager.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel.cu
 )

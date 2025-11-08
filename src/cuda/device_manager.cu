@@ -45,6 +45,10 @@ public:
         d_solutionCount_ = nullptr;
         dagSize_ = 0;
         stream_ = nullptr;
+        startEvent_ = nullptr;
+        stopEvent_ = nullptr;
+        totalHashes_ = 0;
+        totalTime_ = 0.0f;
     }
 
     ~Impl() {
@@ -107,6 +111,10 @@ public:
         // Create CUDA stream for async operations
         CUDA_CHECK(cudaStreamCreate(&stream_));
         
+        // Create events for timing
+        CUDA_CHECK(cudaEventCreate(&startEvent_));
+        CUDA_CHECK(cudaEventCreate(&stopEvent_));
+        
         LOG_INFO("Device " + std::to_string(deviceId) + " initialized successfully");
         return true;
     }
@@ -127,6 +135,9 @@ public:
         // Copy header to device
         CUDA_CHECK(cudaMemcpy(d_header_, headerHash.data(), 32, cudaMemcpyHostToDevice));
         
+        // Start timing
+        CUDA_CHECK(cudaEventRecord(startEvent_, stream_));
+        
         // Launch search kernel
         launch_ethash_search(
             reinterpret_cast<const uint64_t*>(d_dag_),
@@ -141,8 +152,25 @@ public:
             stream_
         );
         
+        // Stop timing
+        CUDA_CHECK(cudaEventRecord(stopEvent_, stream_));
+        
         // Wait for kernel completion
         CUDA_CHECK(cudaStreamSynchronize(stream_));
+        
+        // Calculate elapsed time
+        float milliseconds = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, startEvent_, stopEvent_));
+        
+        // Update statistics
+        totalHashes_ += count;
+        totalTime_ += milliseconds;
+        
+        // Calculate current hashrate (MH/s)
+        float currentHashrate = (count / 1000000.0f) / (milliseconds / 1000.0f);
+        LOG_INFO("Searched " + std::to_string(count) + " nonces in " + 
+                 std::to_string(milliseconds) + " ms (" + 
+                 std::to_string(currentHashrate) + " MH/s)");
         
         // Get solution count
         uint32_t numSolutions = 0;
@@ -166,14 +194,24 @@ public:
                 sol.result.fill(0);
                 solutions.push_back(sol);
             }
+            
+            LOG_INFO("Found " + std::to_string(numSolutions) + " solution(s)!");
         }
         
         return numSolutions;
     }
 
     uint64_t getHashRate(int deviceId) const {
-        // TODO: Calculate hash rate from timing data
-        return 0;
+        // Calculate average hashrate in H/s (hashes per second)
+        if (totalTime_ <= 0.0f) {
+            return 0;
+        }
+        
+        // totalTime_ is in milliseconds, convert to seconds
+        float seconds = totalTime_ / 1000.0f;
+        uint64_t hashrate = static_cast<uint64_t>(totalHashes_ / seconds);
+        
+        return hashrate;
     }
 
 private:
@@ -198,6 +236,14 @@ private:
             cudaStreamDestroy(stream_);
             stream_ = nullptr;
         }
+        if (startEvent_) {
+            cudaEventDestroy(startEvent_);
+            startEvent_ = nullptr;
+        }
+        if (stopEvent_) {
+            cudaEventDestroy(stopEvent_);
+            stopEvent_ = nullptr;
+        }
     }
     
     // Device memory pointers
@@ -207,6 +253,12 @@ private:
     uint32_t* d_solutionCount_;
     size_t dagSize_;
     cudaStream_t stream_;
+    
+    // Timing and statistics
+    cudaEvent_t startEvent_;
+    cudaEvent_t stopEvent_;
+    uint64_t totalHashes_;
+    float totalTime_;  // milliseconds
 };
 
 // DeviceManager implementation
