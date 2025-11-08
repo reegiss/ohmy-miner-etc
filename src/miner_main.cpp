@@ -1,5 +1,6 @@
 #include "ohmy/device_manager.hpp"
 #include "ohmy/stratum_client.hpp"
+#include "ohmy/dag_generator.hpp"
 #include "ohmy/logger.hpp"
 #include <iostream>
 #include <thread>
@@ -149,6 +150,34 @@ int main(int argc, char* argv[]) {
                  std::to_string(device.computeCapability % 10));
         LOG_INFO("  Memory: " + std::to_string(device.totalMemory / (1024*1024)) + " MB");
         LOG_INFO("  SMs: " + std::to_string(device.multiProcessorCount));
+        
+        // Generate DAG for epoch 0 (ETC)
+        LOG_INFO("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        LOG_INFO("Initializing DAG...");
+        LOG_INFO("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        
+        dag::DagGenerator dagGenerator;
+        dagGenerator.setCacheDir("./dag-cache");
+        
+        const uint32_t epoch = 0; // Start with epoch 0
+        const void* dagData = dagGenerator.generate(epoch, false); // CPU generation for now
+        size_t dagSize = dagGenerator.getSize();
+        
+        if (dagData == nullptr) {
+            LOG_ERROR("Failed to generate DAG");
+            return 1;
+        }
+        
+        LOG_INFO("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        LOG_INFO("✓ DAG initialized successfully");
+        LOG_INFO("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        
+        // Initialize device with DAG
+        if (!deviceManager.initDevice(config.deviceId, dagData, dagSize)) {
+            LOG_ERROR("Failed to initialize GPU with DAG");
+            return 1;
+        }
+        LOG_INFO("✓ GPU initialized with DAG");
         
         // Initialize Stratum client
         LOG_INFO("Connecting to pool...");

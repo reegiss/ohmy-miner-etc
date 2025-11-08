@@ -3,6 +3,7 @@
 #include "ohmy/logger.hpp"
 #include <fstream>
 #include <filesystem>
+#include <chrono>
 
 namespace ohmy {
 namespace dag {
@@ -20,33 +21,70 @@ public:
             return dagData_;
         }
 
-        LOG_INFO("Generating DAG for epoch " + std::to_string(epoch));
+        LOG_INFO("Generating DAG for epoch " + std::to_string(epoch) + "...");
 
         // Try to load from cache first
         if (loadFromCache(epoch)) {
-            LOG_INFO("DAG loaded from cache");
+            LOG_INFO("✓ DAG loaded from cache");
             currentEpoch_ = epoch;
             return dagData_;
         }
 
-        // Calculate dataset size
+        // Calculate sizes
+        uint32_t cacheSize = Ethash::getCacheSize(epoch);
         dagSize_ = Ethash::getDatasetSize(epoch);
+        uint32_t numItems = dagSize_ / 64; // Each item is 64 bytes
+        
+        LOG_INFO("  Cache size: " + std::to_string(cacheSize / 1024 / 1024) + " MB");
+        LOG_INFO("  DAG size: " + std::to_string(dagSize_ / 1024 / 1024) + " MB");
+        LOG_INFO("  Items: " + std::to_string(numItems));
+
+        // Generate cache
+        LOG_INFO("  Generating cache...");
+        auto cache = Ethash::calculateCache(epoch);
+        LOG_INFO("  ✓ Cache generated (" + std::to_string(cache.size()) + " items)");
+
+        // Allocate DAG memory
+        cleanup(); // Free old DAG if exists
+        dagData_ = operator new(dagSize_);
+        hash64_t* dag = static_cast<hash64_t*>(dagData_);
+
+        // Generate DAG items
+        LOG_INFO("  Generating DAG items...");
+        auto startTime = std::chrono::steady_clock::now();
         
         if (useGpu) {
-            // TODO: Implement GPU DAG generation
-            LOG_INFO("Generating DAG on GPU...");
-        } else {
-            // TODO: Implement CPU DAG generation
-            LOG_INFO("Generating DAG on CPU...");
+            // For now, fall back to CPU (GPU generation can be added later)
+            LOG_WARN("  GPU generation not implemented yet, using CPU");
         }
-
-        // Allocate memory
-        // dagData_ = allocate(dagSize_);
+        
+        // CPU generation with progress reporting
+        const uint32_t reportInterval = numItems / 10; // Report every 10%
+        for (uint32_t i = 0; i < numItems; i++) {
+            dag[i] = Ethash::calculateDatasetItem(cache, i);
+            
+            if (reportInterval > 0 && (i + 1) % reportInterval == 0) {
+                uint32_t percent = ((i + 1) * 100) / numItems;
+                LOG_INFO("    Progress: " + std::to_string(percent) + "%");
+            }
+        }
+        
+        auto endTime = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime);
+        
+        LOG_INFO("  ✓ DAG generated in " + std::to_string(duration.count()) + "s");
 
         currentEpoch_ = epoch;
         
         // Save to cache
-        saveToCache(epoch);
+        if (!cacheDir_.empty()) {
+            LOG_INFO("  Saving DAG to cache...");
+            if (saveToCache(epoch)) {
+                LOG_INFO("  ✓ DAG saved to cache");
+            } else {
+                LOG_WARN("  Failed to save DAG to cache");
+            }
+        }
         
         return dagData_;
     }
@@ -72,15 +110,36 @@ public:
         if (cacheDir_.empty()) return false;
 
         std::string filename = cacheDir_ + "/dag-" + std::to_string(epoch) + ".bin";
-        std::ifstream file(filename, std::ios::binary);
         
+        if (!std::filesystem::exists(filename)) {
+            return false;
+        }
+        
+        LOG_DEBUG("Loading DAG from cache: " + filename);
+        
+        std::ifstream file(filename, std::ios::binary);
         if (!file.is_open()) {
             return false;
         }
 
-        // TODO: Load DAG from file
-        LOG_DEBUG("Loading DAG from cache: " + filename);
-        return false;
+        // Read DAG size
+        size_t fileSize = std::filesystem::file_size(filename);
+        
+        // Allocate memory
+        cleanup();
+        dagData_ = operator new(fileSize);
+        dagSize_ = fileSize;
+        
+        // Read DAG data
+        file.read(static_cast<char*>(dagData_), fileSize);
+        
+        if (!file.good()) {
+            LOG_ERROR("Failed to read DAG from cache");
+            cleanup();
+            return false;
+        }
+        
+        return true;
     }
 
     bool saveToCache(uint32_t epoch) {
@@ -90,19 +149,27 @@ public:
         std::ofstream file(filename, std::ios::binary);
         
         if (!file.is_open()) {
-            LOG_WARN("Failed to save DAG to cache");
+            LOG_WARN("Failed to open cache file for writing");
             return false;
         }
 
-        // TODO: Save DAG to file
-        LOG_DEBUG("Saving DAG to cache: " + filename);
-        return false;
+        // Write DAG data
+        file.write(static_cast<const char*>(dagData_), dagSize_);
+        
+        if (!file.good()) {
+            LOG_ERROR("Failed to write DAG to cache");
+            return false;
+        }
+        
+        return true;
     }
 
 private:
     void cleanup() {
-        // TODO: Free DAG memory
-        dagData_ = nullptr;
+        if (dagData_ != nullptr) {
+            operator delete(dagData_);
+            dagData_ = nullptr;
+        }
         dagSize_ = 0;
     }
 
