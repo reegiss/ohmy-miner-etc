@@ -1,14 +1,12 @@
 # Source files
 set(SOURCES
-    main.cpp
-    core/miner.cpp
+    miner_main.cpp
     core/ethash.cpp
     core/keccak.cpp
     network/stratum_client.cpp
     network/connection.cpp
     dag/dag_generator.cpp
     utils/logger.cpp
-    utils/config.cpp
 )
 
 # CUDA source files
