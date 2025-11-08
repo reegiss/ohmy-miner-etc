@@ -4,6 +4,7 @@
 #include <cassert>
 #include <iomanip>
 #include <sstream>
+#include <cstring>
 
 using namespace ohmy;
 
@@ -161,6 +162,106 @@ void test_cache_generation() {
     std::cout << "✓ Cache generation test passed\n";
 }
 
+void test_dataset_item() {
+    std::cout << "Testing DAG item calculation..." << std::endl;
+    
+    // Generate cache for epoch 0
+    auto cache = Ethash::calculateCache(0);
+    
+    // Calculate a few dataset items
+    auto item0 = Ethash::calculateDatasetItem(cache, 0);
+    auto item1 = Ethash::calculateDatasetItem(cache, 1);
+    auto item100 = Ethash::calculateDatasetItem(cache, 100);
+    
+    // Items should not be zero
+    bool item0_valid = false, item1_valid = false, item100_valid = false;
+    
+    for (size_t i = 0; i < item0.size(); ++i) {
+        if (item0[i] != 0) item0_valid = true;
+        if (item1[i] != 0) item1_valid = true;
+        if (item100[i] != 0) item100_valid = true;
+    }
+    
+    assert(item0_valid && "Item 0 should not be all zeros");
+    assert(item1_valid && "Item 1 should not be all zeros");
+    assert(item100_valid && "Item 100 should not be all zeros");
+    
+    // Same index should produce same result (deterministic)
+    auto item0_again = Ethash::calculateDatasetItem(cache, 0);
+    assert(item0 == item0_again && "Dataset item calculation should be deterministic");
+    
+    // Different indices should produce different results
+    assert(item0 != item1 && "Different indices should produce different items");
+    assert(item0 != item100 && "Different indices should produce different items");
+    
+    std::cout << "  Item 0 first 4 bytes: " 
+              << std::hex << std::setfill('0')
+              << std::setw(2) << (int)item0[0]
+              << std::setw(2) << (int)item0[1]
+              << std::setw(2) << (int)item0[2]
+              << std::setw(2) << (int)item0[3]
+              << std::dec << std::endl;
+    
+    std::cout << "✓ DAG item calculation test passed\n";
+}
+
+void test_solution_verification() {
+    std::cout << "Testing solution verification..." << std::endl;
+    
+    // Create a mock mining scenario
+    hash32_t headerHash;
+    headerHash.fill(0);
+    headerHash[0] = 0xAB;
+    headerHash[1] = 0xCD;
+    
+    uint64_t nonce = 0x123456789ABCDEF0ULL;
+    
+    // Create a mock mixHash
+    hash32_t mixHash;
+    mixHash.fill(0);
+    for (int i = 0; i < 32; ++i) {
+        mixHash[i] = i * 7 % 256;
+    }
+    
+    // Calculate what the result should be
+    uint8_t hashInput[72];  // header(32) + nonce(8) + mixHash(32)
+    std::memcpy(hashInput, headerHash.data(), 32);
+    for (int i = 0; i < 8; ++i) {
+        hashInput[32 + i] = static_cast<uint8_t>(nonce >> (8 * i));
+    }
+    std::memcpy(hashInput + 40, mixHash.data(), 32);
+    
+    hash32_t result = Keccak::keccak256(hashInput, sizeof(hashInput));
+    
+    // Test 1: Valid solution with high target (easy difficulty)
+    uint64_t highTarget = 0xFFFFFFFFFFFFFFFFULL;  // Very easy
+    bool valid = Ethash::verifySolution(headerHash, nonce, mixHash, result, highTarget);
+    assert(valid && "Solution should be valid with high target");
+    
+    // Test 2: Invalid solution with low target (hard difficulty)
+    uint64_t lowTarget = 0x0000000000000001ULL;  // Nearly impossible
+    bool invalid = Ethash::verifySolution(headerHash, nonce, mixHash, result, lowTarget);
+    assert(!invalid && "Solution should be invalid with very low target");
+    
+    // Test 3: Wrong result should fail verification
+    hash32_t wrongResult = result;
+    wrongResult[0] ^= 0xFF;  // Flip bits
+    bool wrongValid = Ethash::verifySolution(headerHash, nonce, mixHash, wrongResult, highTarget);
+    assert(!wrongValid && "Wrong result should fail verification");
+    
+    // Test 4: Correct result with matching target
+    uint64_t resultValue = 0;
+    for (int i = 0; i < 8; ++i) {
+        resultValue |= static_cast<uint64_t>(result[i]) << (8 * i);
+    }
+    uint64_t matchingTarget = resultValue + 1;  // Just above result
+    bool matchValid = Ethash::verifySolution(headerHash, nonce, mixHash, result, matchingTarget);
+    assert(matchValid && "Solution should be valid with matching target");
+    
+    std::cout << "  Result value: 0x" << std::hex << resultValue << std::dec << std::endl;
+    std::cout << "✓ Solution verification test passed\n";
+}
+
 void test_dataset_size() {
     std::cout << "Testing dataset size calculation..." << std::endl;
     
@@ -213,6 +314,8 @@ int main() {
         test_dataset_size();
         test_cache_size();
         test_cache_generation();
+        test_dataset_item();
+        test_solution_verification();
         
         std::cout << "\n✅ All tests passed!" << std::endl;
         return 0;

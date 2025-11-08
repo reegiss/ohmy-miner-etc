@@ -36,6 +36,14 @@ public:
     static void fnv_mix(uint32_t mix[], const uint32_t data[], size_t count);
 
     /**
+     * @brief Calculate single DAG item
+     * @param cache Pre-generated cache
+     * @param index Item index in dataset
+     * @return 64-byte DAG item
+     */
+    static hash64_t calculateDatasetItem(const std::vector<hash64_t>& cache, uint32_t index);
+
+    /**
      * @brief Calculate full dataset size for given epoch
      */
     static uint64_t getDatasetSize(uint32_t epoch);

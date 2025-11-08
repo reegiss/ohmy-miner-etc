@@ -61,6 +61,43 @@ std::vector<hash64_t> Ethash::calculateCache(uint32_t epoch) {
     return cache;
 }
 
+hash64_t Ethash::calculateDatasetItem(const std::vector<hash64_t>& cache, uint32_t index) {
+    const uint32_t numCacheItems = cache.size();
+    const uint32_t HASH_BYTES = 64;
+    const uint32_t HASH_WORDS = HASH_BYTES / 4;  // 16 words of 32-bit
+    
+    // Initialize mix with cache item (use index % cache_size)
+    hash64_t mix;
+    uint32_t cacheIndex = index % numCacheItems;
+    std::memcpy(mix.data(), cache[cacheIndex].data(), HASH_BYTES);
+    
+    // Cast to uint32_t array for easier manipulation
+    uint32_t* mixWords = reinterpret_cast<uint32_t*>(mix.data());
+    
+    // XOR first word with index
+    mixWords[0] ^= index;
+    
+    // Initial hash
+    mix = Keccak::keccak512(mix);
+    
+    // Mix in DATASET_PARENTS (256) cache items
+    for (uint32_t i = 0; i < DATASET_PARENTS; ++i) {
+        // Determine parent index using FNV mixing
+        uint32_t parentIndex = fnv1a(index ^ i, mixWords[i % HASH_WORDS]) % numCacheItems;
+        
+        // Get parent data
+        const uint32_t* parentWords = reinterpret_cast<const uint32_t*>(cache[parentIndex].data());
+        
+        // FNV mix all words
+        fnv_mix(mixWords, parentWords, HASH_WORDS);
+    }
+    
+    // Final hash
+    mix = Keccak::keccak512(mix);
+    
+    return mix;
+}
+
 uint64_t Ethash::getDatasetSize(uint32_t epoch) {
     // TODO: Calculate exact dataset size for epoch
     // Base size: 1GB + (epoch * 8MB)
@@ -88,10 +125,38 @@ bool Ethash::verifySolution(
     const hash32_t& result,
     uint64_t target
 ) {
-    // TODO: Implement solution verification
-    // 1. Reconstruct hash from header + nonce + mixHash
-    // 2. Compare result with target
-    return false;
+    // Verify that result is below target (difficulty check)
+    // In Ethereum, lower hash value = harder difficulty
+    // Convert result to uint64 for comparison (use first 8 bytes)
+    uint64_t resultValue = 0;
+    for (int i = 0; i < 8; ++i) {
+        resultValue |= static_cast<uint64_t>(result[i]) << (8 * i);
+    }
+    
+    if (resultValue >= target) {
+        return false;  // Result doesn't meet difficulty target
+    }
+    
+    // Reconstruct the final hash to verify it matches provided result
+    // Final hash = Keccak256(header + nonce + mixHash)
+    uint8_t hashInput[32 + 8 + 32];  // header(32) + nonce(8) + mixHash(32)
+    
+    // Copy header
+    std::memcpy(hashInput, headerHash.data(), 32);
+    
+    // Copy nonce (little-endian)
+    for (int i = 0; i < 8; ++i) {
+        hashInput[32 + i] = static_cast<uint8_t>(nonce >> (8 * i));
+    }
+    
+    // Copy mixHash
+    std::memcpy(hashInput + 40, mixHash.data(), 32);
+    
+    // Calculate final hash
+    hash32_t calculatedResult = Keccak::keccak256(hashInput, sizeof(hashInput));
+    
+    // Verify calculated result matches provided result
+    return calculatedResult == result;
 }
 
 } // namespace ohmy
