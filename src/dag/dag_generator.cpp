@@ -4,6 +4,9 @@
 #include <fstream>
 #include <filesystem>
 #include <chrono>
+#include <thread>
+#include <vector>
+#include <atomic>
 
 namespace ohmy {
 namespace dag {
@@ -58,15 +61,43 @@ public:
             LOG_WARN("  GPU generation not implemented yet, using CPU");
         }
         
-        // CPU generation with progress reporting
-        const uint32_t reportInterval = numItems / 10; // Report every 10%
-        for (uint32_t i = 0; i < numItems; i++) {
-            dag[i] = Ethash::calculateDatasetItem(cache, i);
+        // CPU generation with multi-threading
+        const uint32_t numThreads = 1; // std::thread::hardware_concurrency(); // TODO: Fix threading issue
+        LOG_INFO("  Using " + std::to_string(numThreads) + " thread(s)");
+        
+        std::vector<std::thread> threads;
+        const uint32_t itemsPerThread = numItems / numThreads;
+        const uint32_t reportInterval = numItems / 20; // Report every 5%
+        
+        std::atomic<uint32_t> progress{0};
+        std::atomic<uint32_t> lastReported{0};
+        
+        // Capture cache by reference (read-only, thread-safe)
+        const auto& cacheRef = cache;
+        
+        for (uint32_t t = 0; t < numThreads; t++) {
+            uint32_t start = t * itemsPerThread;
+            uint32_t end = (t == numThreads - 1) ? numItems : (t + 1) * itemsPerThread;
             
-            if (reportInterval > 0 && (i + 1) % reportInterval == 0) {
-                uint32_t percent = ((i + 1) * 100) / numItems;
-                LOG_INFO("    Progress: " + std::to_string(percent) + "%");
-            }
+            threads.emplace_back([&cacheRef, dag, start, end, &progress, &lastReported, reportInterval, numItems]() {
+                for (uint32_t i = start; i < end; i++) {
+                    dag[i] = Ethash::calculateDatasetItem(cacheRef, i);
+                    
+                    // Update progress
+                    uint32_t current = progress.fetch_add(1, std::memory_order_relaxed) + 1;
+                    
+                    // Report progress periodically
+                    if (reportInterval > 0 && current % reportInterval == 0) {
+                        uint32_t percent = (current * 100) / numItems;
+                        LOG_INFO("    Progress: " + std::to_string(percent) + "%");
+                    }
+                }
+            });
+        }
+        
+        // Wait for all threads to complete
+        for (auto& thread : threads) {
+            thread.join();
         }
         
         auto endTime = std::chrono::steady_clock::now();
