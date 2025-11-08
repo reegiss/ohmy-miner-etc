@@ -27,7 +27,7 @@ struct DeviceSolution {
     uint8_t result[32];
 };
 
-// Forward declaration of kernel launch function
+// Forward declaration of kernel launch functions
 extern "C" void launch_ethash_search(
     const uint64_t* d_dag,
     uint64_t dagSize,
@@ -36,6 +36,21 @@ extern "C" void launch_ethash_search(
     const uint8_t* d_targetBE,
     uint64_t startNonce,
     uint64_t searchCount,
+    DeviceSolution* d_solutions,
+    uint32_t* d_solutionCount,
+    uint32_t maxSolutions,
+    cudaStream_t stream
+);
+
+extern "C" void launch_ethash_search_optimized(
+    const uint64_t* d_dag,
+    uint64_t dagSize,
+    const uint32_t* d_header,
+    const uint32_t* d_seedHash,
+    const uint8_t* d_targetBE,
+    uint64_t startNonce,
+    uint64_t searchCount,
+    uint32_t noncesPerThread,
     DeviceSolution* d_solutions,
     uint32_t* d_solutionCount,
     uint32_t maxSolutions,
@@ -176,20 +191,49 @@ public:
         // Start timing
         CUDA_CHECK(cudaEventRecord(startEvent_, stream_));
         
-        // Launch search kernel
-        launch_ethash_search(
-            reinterpret_cast<const uint64_t*>(d_dag_),
-            dagSize_,
-            reinterpret_cast<const uint32_t*>(d_header_),
-            reinterpret_cast<const uint32_t*>(d_seedHash_),
-            reinterpret_cast<const uint8_t*>(d_target_),
-            startNonce,
-            count,
-            d_solutions_,
-            d_solutionCount_,
-            maxSolutions,
-            stream_
-        );
+        // Check for optimized kernel flag (env var OHMY_USE_OPTIMIZED_KERNEL=1)
+        static int useOptimized = -1;
+        if (useOptimized == -1) {
+            const char* env = std::getenv("OHMY_USE_OPTIMIZED_KERNEL");
+            useOptimized = (env && std::string(env) == "1") ? 1 : 0;
+            if (useOptimized) {
+                LOG_INFO("Using optimized kernel with batching (noncesPerThread=4)");
+            }
+        }
+        
+        if (useOptimized) {
+            // Use optimized kernel with batching
+            const uint32_t noncesPerThread = 4;  // Each thread processes 4 nonces
+            launch_ethash_search_optimized(
+                reinterpret_cast<const uint64_t*>(d_dag_),
+                dagSize_,
+                reinterpret_cast<const uint32_t*>(d_header_),
+                reinterpret_cast<const uint32_t*>(d_seedHash_),
+                reinterpret_cast<const uint8_t*>(d_target_),
+                startNonce,
+                count,
+                noncesPerThread,
+                d_solutions_,
+                d_solutionCount_,
+                maxSolutions,
+                stream_
+            );
+        } else {
+            // Use base kernel (1 nonce per thread)
+            launch_ethash_search(
+                reinterpret_cast<const uint64_t*>(d_dag_),
+                dagSize_,
+                reinterpret_cast<const uint32_t*>(d_header_),
+                reinterpret_cast<const uint32_t*>(d_seedHash_),
+                reinterpret_cast<const uint8_t*>(d_target_),
+                startNonce,
+                count,
+                d_solutions_,
+                d_solutionCount_,
+                maxSolutions,
+                stream_
+            );
+        }
         
         // Stop timing
         CUDA_CHECK(cudaEventRecord(stopEvent_, stream_));
