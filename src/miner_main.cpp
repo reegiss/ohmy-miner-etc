@@ -27,20 +27,8 @@ void signalHandler(int signal) {
 }
 
 void printBanner() {
-    std::cout << R"(
-╔═══════════════════════════════════════════════════════════╗
-║                                                           ║
-║        ██████╗ ██╗  ██╗███╗   ███╗██╗   ██╗              ║
-║       ██╔═══██╗██║  ██║████╗ ████║╚██╗ ██╔╝              ║
-║       ██║   ██║███████║██╔████╔██║ ╚████╔╝               ║
-║       ██║   ██║██╔══██║██║╚██╔╝██║  ╚██╔╝                ║
-║       ╚██████╔╝██║  ██║██║ ╚═╝ ██║   ██║                 ║
-║        ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝   ╚═╝                 ║
-║                                                           ║
-║          Ethereum Classic GPU Miner v1.0                 ║
-║                                                           ║
-╚═══════════════════════════════════════════════════════════╝
-)" << std::endl;
+    // Minimal banner to align with T-Rex style (keep it short & professional)
+    std::cout << "OhMy Miner ETC v1.0 - Ethereum Classic GPU Miner" << std::endl;
 }
 
 void printUsage(const char* programName) {
@@ -110,6 +98,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    // Print concise banner (no large ASCII art)
     printBanner();
     
     // Set up signal handlers for graceful shutdown
@@ -121,18 +110,19 @@ int main(int argc, char* argv[]) {
         utils::Logger::setLevel(utils::LogLevel::DEBUG);
     }
     
-    LOG_INFO("═══════════════════════════════════════════════════");
-    LOG_INFO("  OhMy Miner ETC - Starting...");
-    LOG_INFO("═══════════════════════════════════════════════════");
-    LOG_INFO("Pool: " + config.poolUrl);
-    LOG_INFO("Wallet: " + config.walletAddress);
+    LOG_INFO("OhMy Miner ETC v1.0");
+    LOG_INFO("");
+    LOG_INFO("URL : stratum+tcp://" + config.poolUrl);
+    LOG_INFO("USER: " + config.walletAddress);
     if (!config.workerName.empty()) {
-        LOG_INFO("Worker: " + config.workerName);
+        LOG_INFO("WRK : " + config.workerName);
     }
-    LOG_INFO("Device: " + std::to_string(config.deviceId));
-    LOG_INFO("═══════════════════════════════════════════════════");
+    LOG_INFO("");
     
     try {
+        // Track program start time for uptime
+        auto programStart = std::chrono::steady_clock::now();
+        
         // Initialize CUDA device
         LOG_INFO("Initializing GPU device " + std::to_string(config.deviceId) + "...");
         cuda::DeviceManager deviceManager;
@@ -150,19 +140,14 @@ int main(int argc, char* argv[]) {
         }
         
         const auto& device = devices[config.deviceId];
-        LOG_INFO("Using device: " + device.name);
-        LOG_INFO("  Compute Capability: " + std::to_string(device.computeCapability / 10) + "." + 
-                 std::to_string(device.computeCapability % 10));
-        LOG_INFO("  Memory: " + std::to_string(device.totalMemory / (1024*1024)) + " MB");
-        LOG_INFO("  SMs: " + std::to_string(device.multiProcessorCount));
+        LOG_INFO("GPU : " + device.name);
+        LOG_INFO("ALGO: etchash");
         
         // Prepare DAG generator (epoch will be derived from first job's seed hash)
         dag::DagGenerator dagGenerator;
         dagGenerator.setCacheDir("./dag-cache");
-        LOG_INFO("DAG generator ready (will build on first job epoch)");
         
         // Initialize Stratum client
-        LOG_INFO("Connecting to pool...");
         network::StratumClient stratumClient(config.poolUrl, config.walletAddress);
         
         // Connect to pool
@@ -170,21 +155,18 @@ int main(int argc, char* argv[]) {
             LOG_ERROR("Failed to connect to pool");
             return 1;
         }
-        LOG_INFO("✓ Connected to pool");
         
         // Subscribe to mining
         if (!stratumClient.subscribe()) {
             LOG_ERROR("Failed to subscribe to pool");
             return 1;
         }
-        LOG_INFO("✓ Subscribed to pool");
         
         // Authorize worker
         if (!stratumClient.authorize(config.workerName)) {
             LOG_ERROR("Failed to authorize with pool");
             return 1;
         }
-        LOG_INFO("✓ Authorized with pool");
         
         // Set up job callback
         std::atomic<bool> hasJob{false};
@@ -193,13 +175,11 @@ int main(int argc, char* argv[]) {
         stratumClient.setOnJob([&](const MiningJob& job) {
             currentJob = job;
             hasJob = true;
-            LOG_INFO("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            LOG_INFO("📋 New mining job: " + job.jobId);
-            LOG_INFO("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            LOG_DEBUG("New job: " + job.jobId.substr(0, 16) + "...");
             // Initialize DAG lazily when first job arrives or epoch changes
             static uint32_t currentDagEpoch = UINT32_MAX;
             if (job.epoch != currentDagEpoch) {
-                LOG_INFO("Epoch changed (" + std::to_string(currentDagEpoch) + " -> " + std::to_string(job.epoch) + ") - generating/loading DAG...");
+                LOG_INFO("Generating DAG for epoch " + std::to_string(job.epoch) + "...");
                 // Use GPU DAG generation for faster startup (pass true)
                 const void* dagData = dagGenerator.generate(job.epoch, true);
                 size_t dagSize = dagGenerator.getSize();
@@ -213,7 +193,7 @@ int main(int argc, char* argv[]) {
                     g_running = false;
                     return;
                 }
-                LOG_INFO("✓ GPU initialized with DAG epoch " + std::to_string(job.epoch) + ", size " + std::to_string(dagSize / (1024*1024)) + " MB");
+                LOG_INFO("DAG ready, epoch " + std::to_string(job.epoch) + " (" + std::to_string(dagSize / (1024*1024)) + " MB)");
                 currentDagEpoch = job.epoch;
             }
         });
@@ -250,15 +230,11 @@ int main(int argc, char* argv[]) {
                 utils::targetFromDifficulty(difficulty, currentTarget256);
             }
             std::stringstream tgt;
-            tgt << "⚙️  Difficulty updated: " << difficulty << "\n     Target (BE): ";
-            for (int i = 0; i < 32; ++i) {
-                tgt << std::hex << std::setw(2) << std::setfill('0') << (int)currentTarget256[i];
-                if ((i+1)%4==0) tgt << ' ';
-            }
+            tgt << "Difficulty: " << difficulty;
             LOG_INFO(tgt.str());
         });
         
-        LOG_INFO("\n🚀 Mining started! Press Ctrl+C to stop.\n");
+        LOG_INFO("Mining started");
         
         // Main mining loop
         auto lastStatsTime = std::chrono::steady_clock::now();
@@ -387,12 +363,12 @@ int main(int argc, char* argv[]) {
                 
                 // If job changed during the GPU batch, discard solutions (avoid stale shares)
                 if (currentJob.jobId != miningJobId) {
-                    LOG_INFO("⚠️  Discarding " + std::to_string(numFound) + " solutions due to job change (" + miningJobId + " -> " + currentJob.jobId + ")");
+                    LOG_INFO("Job changed, discarding " + std::to_string(numFound) + " solutions");
                 } else {
-                    LOG_INFO("💎 Found " + std::to_string(numFound) + " valid share(s) on GPU for job " + miningJobId + "!");
+                    LOG_INFO("Share found! Submitting " + std::to_string(numFound) + " solution(s)...");
                     
                     if (debugTargetOverride) {
-                        LOG_WARN("Debug target override active: NOT submitting shares to pool to avoid invalid submissions.");
+                        LOG_WARN("Debug target override active: NOT submitting shares to pool");
                     }
                     
                     // Submit shares one by one, checking if job changed before each submission
@@ -403,10 +379,9 @@ int main(int argc, char* argv[]) {
                         }
                         // Check if job changed before submitting
                         if (currentJob.jobId != miningJobId) {
-                            LOG_WARN("   ⚠️  Job changed to " + currentJob.jobId + " during submission, discarding remaining " + std::to_string(numFound - submitted) + " shares");
+                            LOG_WARN("Job changed during submission, discarding remaining " + std::to_string(numFound - submitted) + " shares");
                             break;
                         }
-                        LOG_INFO("   Nonce: " + std::to_string(solution.nonce) + " -> submitting to pool");
                         if (stratumClient.submitSolution(solution)) {
                             acceptedShares++;
                             LOG_INFO("✓ Share accepted (" + std::to_string(acceptedShares) + " total)");
@@ -418,30 +393,50 @@ int main(int argc, char* argv[]) {
                 }
             }
             
-            // Print stats every 10 seconds
-            if (now - lastStatsTime > 10s) {
+            // Print stats every 30 seconds (T-Rex style)
+            if (now - lastStatsTime > 30s) {
                 double hashRate = deviceManager.getHashRate(config.deviceId);
-                // Expected time to share: difficulty * 2^32 / hashRate
-                double expectedSeconds = 0.0;
-                if (lastDifficulty > 0 && hashRate > 0) {
-                    long double work = static_cast<long double>(lastDifficulty) * static_cast<long double>(1ULL << 32);
-                    expectedSeconds = static_cast<double>(work / static_cast<long double>(hashRate));
+                auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - programStart).count();
+                
+                // Format uptime like T-Rex
+                std::string uptimeStr;
+                if (uptime < 60) {
+                    uptimeStr = std::to_string(uptime) + " sec" + (uptime > 1 ? "s" : "");
+                } else if (uptime < 3600) {
+                    int mins = uptime / 60;
+                    int secs = uptime % 60;
+                    uptimeStr = std::to_string(mins) + " min" + (mins > 1 ? "s" : "") + " " + std::to_string(secs) + " sec" + (secs > 1 ? "s" : "");
+                } else {
+                    int hours = uptime / 3600;
+                    int mins = (uptime % 3600) / 60;
+                    int secs = uptime % 60;
+                    uptimeStr = std::to_string(hours) + " hr" + (hours > 1 ? "s" : "") + " " + std::to_string(mins) + " min" + (mins > 1 ? "s" : "");
                 }
                 
-                LOG_INFO("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                LOG_INFO("📊 Mining Statistics:");
-                LOG_INFO("   Hash Rate: " + std::string(hashRate >= 1e6 ? 
-                    std::to_string(hashRate / 1e6) + " MH/s" :
-                    std::to_string(hashRate / 1e3) + " KH/s"));
-                LOG_INFO("   Total Hashes: " + std::to_string(totalHashes));
-                LOG_INFO("   Accepted Shares: " + std::to_string(acceptedShares));
-                if (lastDifficulty > 0) {
-                    LOG_INFO("   Share Difficulty: " + std::to_string(lastDifficulty));
-                    if (expectedSeconds > 0.0) {
-                        LOG_INFO("   Expected Avg Time/share: " + std::to_string(expectedSeconds/60.0) + " min");
-                    }
-                }
-                LOG_INFO("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                // Get difficulty in G format
+                double diffG = lastDifficulty / 1e9;
+                
+                // Format hashrate in MH/s
+                std::ostringstream hashStream;
+                hashStream << std::fixed << std::setprecision(2) << (hashRate / 1e6);
+                
+                // T-Rex style separator line and stats
+                std::cout << "\n---------------------";
+                auto t = std::time(nullptr);
+                auto tm = *std::localtime(&t);
+                std::cout << std::put_time(&tm, "%Y%m%d %H:%M:%S");
+                std::cout << " ---------------------\n";
+                
+                std::ostringstream poolLine;
+                poolLine << "Mining at " << config.poolUrl << ", diff: " << std::fixed << std::setprecision(2) << diffG << " G";
+                LOG_INFO(poolLine.str());
+                
+                std::ostringstream gpuLine;
+                gpuLine << "GPU #0: " << devices[0].name << " - " << hashStream.str() << " MH/s";
+                LOG_INFO(gpuLine.str());
+                
+                LOG_INFO("Shares/min: 0");
+                LOG_INFO("Uptime: " + uptimeStr + " | Algo: etchash | OhMy-Miner v1.0");
                 
                 lastStatsTime = now;
             }

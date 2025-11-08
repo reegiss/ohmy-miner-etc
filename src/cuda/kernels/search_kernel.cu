@@ -392,6 +392,141 @@ __global__ void ethash_search_kernel_optimized(
 }
 
 /**
+ * @brief Optimized search kernel with texture memory for DAG access
+ * 
+ * Uses CUDA texture memory for DAG reads to leverage L1 cache and improve
+ * memory access patterns. Expected improvement: +5-10% over direct global memory.
+ */
+__global__ void ethash_search_kernel_texture(
+    cudaTextureObject_t texDAG,
+    uint64_t dagSize,
+    const uint32_t* __restrict__ header,
+    const uint32_t* __restrict__ seedHash,
+    const uint8_t* __restrict__ targetBE,
+    uint64_t startNonce,
+    uint32_t noncesPerThread,
+    DeviceSolution* solutions,
+    uint32_t* solutionCount,
+    uint32_t maxSolutions
+) {
+    // Shared memory for frequently accessed data
+    __shared__ uint32_t s_header[8];
+    __shared__ uint32_t s_seedHash[16];
+    
+    // Cooperative loading into shared memory
+    if (threadIdx.x < 8) {
+        s_header[threadIdx.x] = header[threadIdx.x];
+    }
+    if (threadIdx.x < 16) {
+        s_seedHash[threadIdx.x] = seedHash[threadIdx.x];
+    }
+    __syncthreads();
+    
+    // Each thread processes multiple nonces
+    const uint64_t threadId = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t baseNonce = startNonce + threadId * noncesPerThread;
+    
+    // Process nonces in batch
+    #pragma unroll 4
+    for (uint32_t batch = 0; batch < noncesPerThread; ++batch) {
+        const uint64_t nonce = baseNonce + batch;
+        
+        // Keccak512 on header + nonce
+        uint64_t seed[8];
+        uint8_t keccak_input[40];
+        
+        // Copy header to keccak input
+        #pragma unroll 8
+        for (int i = 0; i < 8; ++i) {
+            ((uint32_t*)keccak_input)[i] = s_header[i];
+        }
+        
+        // Append nonce (little-endian)
+        ((uint64_t*)keccak_input)[4] = nonce;
+        
+        // Keccak512
+        keccak512_dev(keccak_input, 40, (uint8_t*)seed);
+        
+        // Initialize mix with seed
+        uint32_t mix[32];
+        #pragma unroll 16
+        for (int i = 0; i < 16; ++i) {
+            mix[i * 2] = ((uint32_t*)seed)[i];
+            mix[i * 2 + 1] = ((uint32_t*)seed)[i];
+        }
+        
+        // DAG mixing - using TEXTURE MEMORY for random access
+        const uint32_t numParents = 256;
+        
+        #pragma unroll 4
+        for (uint32_t round = 0; round < 64; ++round) {
+            const uint32_t mixIdx = round % 16;
+            const uint32_t t = fnv1a(seed[0] ^ round, mix[mixIdx]);
+            
+            // Calculate parent index with bounds checking
+            const uint64_t parentIndex = t % numParents;
+            const uint64_t dagIdx = parentIndex * 16;
+            
+            if (dagIdx + 15 < dagSize) {
+                // TEXTURE FETCH: Use tex1Dfetch for DAG access
+                // This leverages L1 texture cache for better performance
+                #pragma unroll 16
+                for (int j = 0; j < 16; ++j) {
+                    uint2 texel = tex1Dfetch<uint2>(texDAG, dagIdx + j);
+                    uint64_t dagValue = ((uint64_t)texel.y << 32) | texel.x;
+                    mix[j] = fnv1a(mix[j], (uint32_t)dagValue);
+                    mix[j + 16] = fnv1a(mix[j + 16], (uint32_t)(dagValue >> 32));
+                }
+            }
+        }
+        
+        // Compress mix to 32 bytes
+        uint32_t compressed[8];
+        #pragma unroll 8
+        for (int i = 0; i < 8; ++i) {
+            compressed[i] = fnv1a(mix[i * 4], mix[i * 4 + 1]);
+            compressed[i] = fnv1a(compressed[i], mix[i * 4 + 2]);
+            compressed[i] = fnv1a(compressed[i], mix[i * 4 + 3]);
+        }
+        
+        // Final Keccak256
+        uint8_t final_input[64 + 32];
+        memcpy(final_input, seed, 64);
+        memcpy(final_input + 64, compressed, 32);
+        
+        uint8_t result_hash[32];
+        keccak256_dev(final_input, 96, result_hash);
+        
+        // Compare against target (big-endian comparison)
+        int cmp = 0;
+        #pragma unroll 32
+        for (int i = 0; i < 32 && cmp == 0; ++i) {
+            if (result_hash[i] < targetBE[i]) {
+                cmp = -1;
+            } else if (result_hash[i] > targetBE[i]) {
+                cmp = 1;
+            }
+        }
+        
+        // Store solution if found
+        if (cmp <= 0) {
+            uint32_t idx = atomicAdd(solutionCount, 1);
+            if (idx < maxSolutions) {
+                solutions[idx].nonce = nonce;
+                #pragma unroll 8
+                for (int i = 0; i < 8; ++i) {
+                    ((uint32_t*)solutions[idx].mixHash)[i] = compressed[i];
+                }
+                #pragma unroll 32
+                for (int i = 0; i < 32; ++i) {
+                    solutions[idx].result[i] = result_hash[i];
+                }
+            }
+        }
+    }
+}
+
+/**
  * @brief Host function to launch optimized search kernel
  */
 extern "C" void launch_ethash_search_optimized(
@@ -416,6 +551,43 @@ extern "C" void launch_ethash_search_optimized(
     // Launch optimized kernel
     ethash_search_kernel_optimized<<<blocks, threadsPerBlock, 0, stream>>>(
         d_dag,
+        dagSize,
+        d_header,
+        d_seedHash,
+        d_targetBE,
+        startNonce,
+        noncesPerThread,
+        d_solutions,
+        d_solutionCount,
+        maxSolutions
+    );
+}
+
+/**
+ * @brief Host function to launch texture memory optimized kernel
+ */
+extern "C" void launch_ethash_search_texture(
+    cudaTextureObject_t texDAG,
+    uint64_t dagSize,
+    const uint32_t* d_header,
+    const uint32_t* d_seedHash,
+    const uint8_t* d_targetBE,
+    uint64_t startNonce,
+    uint64_t searchCount,
+    uint32_t noncesPerThread,
+    DeviceSolution* d_solutions,
+    uint32_t* d_solutionCount,
+    uint32_t maxSolutions,
+    cudaStream_t stream
+) {
+    // Calculate grid dimensions with batching
+    const int threadsPerBlock = 256;
+    const int totalThreads = (searchCount + noncesPerThread - 1) / noncesPerThread;
+    const int blocks = (totalThreads + threadsPerBlock - 1) / threadsPerBlock;
+    
+    // Launch texture memory kernel
+    ethash_search_kernel_texture<<<blocks, threadsPerBlock, 0, stream>>>(
+        texDAG,
         dagSize,
         d_header,
         d_seedHash,

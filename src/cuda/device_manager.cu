@@ -57,6 +57,21 @@ extern "C" void launch_ethash_search_optimized(
     cudaStream_t stream
 );
 
+extern "C" void launch_ethash_search_texture(
+    cudaTextureObject_t texDAG,
+    uint64_t dagSize,
+    const uint32_t* d_header,
+    const uint32_t* d_seedHash,
+    const uint8_t* d_targetBE,
+    uint64_t startNonce,
+    uint64_t searchCount,
+    uint32_t noncesPerThread,
+    DeviceSolution* d_solutions,
+    uint32_t* d_solutionCount,
+    uint32_t maxSolutions,
+    cudaStream_t stream
+);
+
 class DeviceManager::Impl {
 public:
     Impl() {
@@ -76,6 +91,8 @@ public:
         stopEvent_ = nullptr;
         totalHashes_ = 0;
         totalTime_ = 0.0f;
+        useTexture_ = false;
+        texDAG_ = 0;
     }
 
     ~Impl() {
@@ -135,7 +152,7 @@ public:
             for (int i = 0; i < 4; i++) {
                 ss << " 0x" << std::setw(16) << std::setfill('0') << dagHost[i];
             }
-            LOG_INFO(ss.str());
+            LOG_DEBUG(ss.str());
             
             // Also log DAG item 1 (starts at offset 8 uint64s)
             ss.str("");
@@ -143,7 +160,7 @@ public:
             for (int i = 0; i < 4; i++) {
                 ss << " 0x" << std::setw(16) << std::setfill('0') << dagHost[8 + i];
             }
-            LOG_INFO(ss.str());
+            LOG_DEBUG(ss.str());
         }
         
         // Allocate device memory for header and seedHash
@@ -157,6 +174,39 @@ public:
 
         // Allocate device memory for 256-bit target (big-endian)
         CUDA_CHECK(cudaMalloc(&d_target_, 32));
+        
+        // Check if texture memory should be used
+        const char* texEnv = std::getenv("OHMY_USE_TEXTURE_MEMORY");
+        useTexture_ = (texEnv && std::string(texEnv) == "1");
+        
+        // Create texture object for DAG if enabled
+        if (useTexture_) {
+            // Configure resource descriptor
+            // DAG is stored as uint64_t but we access as uint2 (2x uint32_t)
+            cudaResourceDesc resDesc;
+            memset(&resDesc, 0, sizeof(resDesc));
+            resDesc.resType = cudaResourceTypeLinear;
+            resDesc.res.linear.devPtr = d_dag_;
+            resDesc.res.linear.desc = cudaCreateChannelDesc(32, 32, 0, 0, cudaChannelFormatKindUnsigned);
+            resDesc.res.linear.sizeInBytes = dagSize;
+            
+            // Configure texture descriptor
+            cudaTextureDesc texDesc;
+            memset(&texDesc, 0, sizeof(texDesc));
+            texDesc.readMode = cudaReadModeElementType;
+            
+            // Create the texture object
+            cudaError_t err = cudaCreateTextureObject(&texDAG_, &resDesc, &texDesc, nullptr);
+            if (err != cudaSuccess) {
+                LOG_ERROR("Failed to create texture object: " + std::string(cudaGetErrorString(err)));
+                useTexture_ = false;
+                texDAG_ = 0;
+            } else {
+                LOG_INFO("DAG bound to texture object for optimized cache access");
+            }
+        } else {
+            texDAG_ = 0;  // No texture object
+        }
         
         // Create CUDA stream for async operations
         CUDA_CHECK(cudaStreamCreate(&stream_));
@@ -193,10 +243,14 @@ public:
         
         // Check for optimized kernel flag (env var OHMY_USE_OPTIMIZED_KERNEL=1)
         static int useOptimized = -1;
+        static int useTexture = -1;
         static uint32_t noncesPerThread = 4;  // Default: 4 nonces/thread (best balance: +17%)
         if (useOptimized == -1) {
             const char* env = std::getenv("OHMY_USE_OPTIMIZED_KERNEL");
             useOptimized = (env && std::string(env) == "1") ? 1 : 0;
+            
+            const char* texEnv = std::getenv("OHMY_USE_TEXTURE_MEMORY");
+            useTexture = (texEnv && std::string(texEnv) == "1") ? 1 : 0;
             
             // Allow custom noncesPerThread via env var for experimentation
             const char* batchEnv = std::getenv("OHMY_NONCES_PER_THREAD");
@@ -207,13 +261,32 @@ public:
                 }
             }
             
-            if (useOptimized) {
+            if (useTexture) {
+                LOG_INFO("Using texture memory kernel (noncesPerThread=" + 
+                         std::to_string(noncesPerThread) + ")");
+            } else if (useOptimized) {
                 LOG_INFO("Using optimized kernel with batching (noncesPerThread=" + 
                          std::to_string(noncesPerThread) + ")");
             }
         }
         
-        if (useOptimized) {
+        if (useTexture && useTexture_) {
+            // Use texture memory kernel
+            launch_ethash_search_texture(
+                texDAG_,
+                dagSize_,
+                reinterpret_cast<const uint32_t*>(d_header_),
+                reinterpret_cast<const uint32_t*>(d_seedHash_),
+                reinterpret_cast<const uint8_t*>(d_target_),
+                startNonce,
+                count,
+                noncesPerThread,
+                d_solutions_,
+                d_solutionCount_,
+                maxSolutions,
+                stream_
+            );
+        } else if (useOptimized) {
             // Use optimized kernel with advanced caching and high batching
             launch_ethash_search_optimized(
                 reinterpret_cast<const uint64_t*>(d_dag_),
@@ -307,6 +380,12 @@ public:
 
 private:
     void cleanup() {
+        // Destroy texture object if it was created
+        if (texDAG_ != 0) {
+            cudaDestroyTextureObject(texDAG_);
+            texDAG_ = 0;
+        }
+        
         if (d_dag_) {
             cudaFree(d_dag_);
             d_dag_ = nullptr;
@@ -354,6 +433,10 @@ private:
     void* d_target_;
     size_t dagSize_;
     cudaStream_t stream_;
+    
+    // Optimization flags and resources
+    bool useTexture_;               // Whether texture memory is enabled
+    cudaTextureObject_t texDAG_;    // Texture object for DAG access
     
     // Timing and statistics
     cudaEvent_t startEvent_;

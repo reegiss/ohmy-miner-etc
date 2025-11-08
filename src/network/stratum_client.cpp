@@ -476,7 +476,7 @@ private:
     void processNotification(const json& message) {
         try {
             std::string method = message["method"].get<std::string>();
-            LOG_INFO("📨 Processing notification: " + method);
+            LOG_DEBUG("Processing notification: " + method);
             
             if (method == "mining.notify") {
                 // Parse mining.notify message
@@ -484,23 +484,23 @@ private:
                 // Params: [jobId, seedHash, headerHash, cleanJobs]
                 const auto& params = message["params"];
                 
-                LOG_INFO("mining.notify params size: " + std::to_string(params.size()));
+                LOG_DEBUG("mining.notify params size: " + std::to_string(params.size()));
                 for (size_t i = 0; i < params.size(); i++) {
-                    LOG_INFO("  param[" + std::to_string(i) + "]: " + params[i].dump().substr(0, 60));
+                    LOG_DEBUG("  param[" + std::to_string(i) + "]: " + params[i].dump().substr(0, 60));
                 }
                 
                 if (params.size() >= 3) {
                     MiningJob job;
                     job.jobId = params[0].get<std::string>();
                     
-                    LOG_INFO("Job ID: " + job.jobId);
+                    LOG_DEBUG("Job ID: " + job.jobId);
                     
                     // Parse hex strings - Ethash format
                     std::string seedHashHex = params[1].get<std::string>();
                     std::string headerHashHex = params[2].get<std::string>();
                     
-                    LOG_INFO("Seed: " + seedHashHex);
-                    LOG_INFO("Header: " + headerHashHex.substr(0, 20) + "...");
+                    LOG_DEBUG("Seed: " + seedHashHex);
+                    LOG_DEBUG("Header: " + headerHashHex.substr(0, 20) + "...");
                     
                     // Convert hex strings using HexUtils
                     if (!utils::HexUtils::hexToHash32(headerHashHex, job.headerHash)) {
@@ -530,7 +530,7 @@ private:
                     LOG_INFO("✓ New mining job received: " + job.jobId);
                     
                     if (onJob_) {
-                        LOG_INFO("Calling onJob callback...");
+                        LOG_DEBUG("Calling onJob callback...");
                         onJob_(job);
                     } else {
                         LOG_WARN("onJob callback is not set!");
@@ -541,9 +541,9 @@ private:
             } else if (method == "mining.set_difficulty") {
                 // Parse difficulty change
                 const auto& params = message["params"];
-                LOG_INFO("📊 mining.set_difficulty received with " + std::to_string(params.size()) + " params");
+                LOG_DEBUG("mining.set_difficulty received with " + std::to_string(params.size()) + " params");
                 if (params.size() >= 1) {
-                    LOG_INFO("   Raw param[0]: " + params[0].dump());
+                    LOG_DEBUG("Raw param[0]: " + params[0].dump());
                     
                     // Difficulty can come as integer or floating point
                     uint64_t difficulty = 0;
@@ -566,7 +566,7 @@ private:
                     LOG_INFO("   Target64 (approximate): " + std::to_string(target64));
                     
                     if (onDifficulty_) {
-                        LOG_INFO("   Calling onDifficulty callback with diff=" + std::to_string(difficulty));
+                        LOG_DEBUG("Calling onDifficulty callback with diff=" + std::to_string(difficulty));
                         onDifficulty_(difficulty);
                     } else {
                         LOG_WARN("   onDifficulty callback is not set!");

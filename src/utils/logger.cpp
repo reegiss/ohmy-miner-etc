@@ -39,7 +39,7 @@ static std::string getTimestamp() {
     auto t = std::time(nullptr);
     auto tm = *std::localtime(&t);
     std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    oss << std::put_time(&tm, "%Y%m%d %H:%M:%S");
     return oss.str();
 }
 
@@ -49,8 +49,18 @@ static void log(LogLevel level, const std::string& message) {
     }
 
     std::string timestamp = getTimestamp();
-    std::string levelStr = getLevelString(level);
-    std::string logMessage = "[" + timestamp + "] [" + levelStr + "] " + message;
+    std::string logMessage;
+    
+    // Format: "20251108 20:08:02 message" (no level tag for INFO, add WARN/ERROR prefix for others)
+    if (level == LogLevel::WARN) {
+        logMessage = timestamp + " WARN: " + message;
+    } else if (level == LogLevel::ERROR) {
+        logMessage = timestamp + " ERROR: " + message;
+    } else if (level == LogLevel::FATAL) {
+        logMessage = timestamp + " FATAL: " + message;
+    } else {
+        logMessage = timestamp + " " + message;
+    }
 
     // Print to console
     if (level >= LogLevel::ERROR) {
