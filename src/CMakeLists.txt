@@ -7,6 +7,7 @@ set(SOURCES
     network/connection.cpp
     dag/dag_generator.cpp
     utils/logger.cpp
+    utils/hex_utils.cpp
 )
 
 # CUDA source files

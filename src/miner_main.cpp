@@ -242,13 +242,18 @@ int main(int argc, char* argv[]) {
                 continue;
             }
             
-            // Mine for a short burst (100ms)
+            // Mine for a short burst
             const uint64_t startNonce = totalHashes;
             const uint64_t searchRange = 1000000; // Search 1M nonces
             
-            // Prepare dummy data for now (will use real job data later)
-            hash32_t headerHash{};
-            uint64_t target = 0xFFFFFFFFFFFFFFFF; // High target for testing
+            // Use real job data if available
+            hash32_t headerHash = currentJob.headerHash;
+            uint64_t target = currentJob.target;
+            
+            // If no valid target, use high value for testing
+            if (target == 0) {
+                target = 0xFFFFFFFFFFFFFFFF;
+            }
             
             std::vector<Solution> solutions;
             uint32_t numFound = deviceManager.search(

@@ -19,6 +19,12 @@ add_executable(test_stratum
     ${PROJECT_SOURCE_DIR}/src/network/stratum_client.cpp
     ${PROJECT_SOURCE_DIR}/src/network/connection.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
+    ${PROJECT_SOURCE_DIR}/src/utils/hex_utils.cpp
+)
+
+add_executable(test_hex_utils
+    unit/test_hex_utils.cpp
+    ${PROJECT_SOURCE_DIR}/src/utils/hex_utils.cpp
 )
 
 target_link_libraries(test_ethash PRIVATE Threads::Threads)
@@ -28,6 +34,7 @@ target_link_libraries(test_stratum PRIVATE Threads::Threads OpenSSL::SSL OpenSSL
 target_include_directories(test_ethash PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(test_dag PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(test_stratum PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(test_hex_utils PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # Benchmark tests - compile separately
 add_executable(bench_ethash
@@ -56,5 +63,6 @@ target_include_directories(bench_cuda PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME TestEthash COMMAND test_ethash)
 add_test(NAME TestDAG COMMAND test_dag)
 add_test(NAME TestStratum COMMAND test_stratum)
+add_test(NAME TestHexUtils COMMAND test_hex_utils)
 add_test(NAME BenchEthash COMMAND bench_ethash)
 add_test(NAME BenchCUDA COMMAND bench_cuda)

@@ -1,5 +1,6 @@
 #include "ohmy/stratum_client.hpp"
 #include "ohmy/logger.hpp"
+#include "ohmy/hex_utils.hpp"
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <sys/socket.h>
@@ -346,14 +347,22 @@ private:
                     std::string seedHashHex = params[2].is_string() ? params[2].get<std::string>() : "";
                     std::string targetHex = params[6].get<std::string>();
                     
-                    // Convert hex strings (remove 0x prefix if present)
-                    if (headerHashHex.substr(0, 2) == "0x") headerHashHex = headerHashHex.substr(2);
-                    if (seedHashHex.substr(0, 2) == "0x") seedHashHex = seedHashHex.substr(2);
-                    if (targetHex.substr(0, 2) == "0x") targetHex = targetHex.substr(2);
+                    // Convert hex strings using HexUtils
+                    if (!utils::HexUtils::hexToHash32(headerHashHex, job.headerHash)) {
+                        LOG_WARN("Failed to parse header hash: " + headerHashHex);
+                    }
                     
-                    // For now, just store jobId - actual hex conversion would need helper function
-                    // TODO: Implement hex string to hash32_t conversion
-                    job.target = std::stoull(targetHex.substr(0, 16), nullptr, 16);
+                    if (!seedHashHex.empty()) {
+                        if (!utils::HexUtils::hexToHash32(seedHashHex, job.seedHash)) {
+                            LOG_WARN("Failed to parse seed hash: " + seedHashHex);
+                        }
+                    }
+                    
+                    if (!utils::HexUtils::hexToUint64(targetHex, job.target)) {
+                        LOG_WARN("Failed to parse target: " + targetHex);
+                        job.target = 0xFFFFFFFFFFFFFFFF; // Default high target
+                    }
+                    
                     job.blockNumber = 0;  // Will be set from pool if provided
                     job.epoch = 0;
                     
@@ -363,8 +372,8 @@ private:
                     currentJob_ = job;
                     
                     LOG_INFO("New mining job received: " + job.jobId);
-                    LOG_DEBUG("  Header hash hex: " + headerHashHex.substr(0, 16) + "...");
-                    LOG_DEBUG("  Target: " + std::to_string(job.target));
+                    LOG_DEBUG("  Header hash: " + headerHashHex.substr(0, 16) + "...");
+                    LOG_DEBUG("  Target: 0x" + std::to_string(job.target));
                     
                     if (onJob_) {
                         onJob_(job);
