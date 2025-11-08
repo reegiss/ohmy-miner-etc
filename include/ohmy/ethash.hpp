@@ -11,9 +11,29 @@ namespace ohmy {
 class Ethash {
 public:
     /**
-     * @brief Calculate light cache for given epoch
+     * @brief Calculate cache for an epoch
+     * @param epoch Epoch number
+     * @return Cache as vector of 64-byte hashes
      */
     static std::vector<hash64_t> calculateCache(uint32_t epoch);
+    
+    /**
+     * @brief FNV-1a hash function (32-bit)
+     * Used for mixing in Ethash algorithm
+     * @param a First value
+     * @param b Second value
+     * @return FNV hash of a and b
+     */
+    static inline uint32_t fnv1a(uint32_t a, uint32_t b) {
+        return a * FNV_PRIME ^ b;
+    }
+    
+    /**
+     * @brief FNV hash for mixing arrays
+     * @param mix Array to mix (modified in-place)
+     * @param data Data to mix in
+     */
+    static void fnv_mix(uint32_t mix[], const uint32_t data[], size_t count);
 
     /**
      * @brief Calculate full dataset size for given epoch
@@ -46,6 +66,7 @@ private:
     static const uint64_t MIX_BYTES = 128;
     static const uint32_t DATASET_PARENTS = 256;
     static const uint32_t CACHE_ROUNDS = 3;
+    static const uint32_t FNV_PRIME = 0x01000193;
 };
 
 } // namespace ohmy

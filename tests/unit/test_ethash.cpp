@@ -109,6 +109,58 @@ void test_epoch_calculation() {
     std::cout << "✓ Epoch calculation tests passed\n";
 }
 
+void test_fnv_hash() {
+    // Test FNV-1a hash function
+    // FNV prime: 0x01000193
+    uint32_t a = 0x12345678;
+    uint32_t b = 0xABCDEF00;
+    uint32_t result = Ethash::fnv1a(a, b);
+    
+    // Expected: a * 0x01000193 ^ b
+    uint32_t expected = (a * 0x01000193) ^ b;
+    assert(result == expected);
+    
+    std::cout << "✓ FNV hash test passed\n";
+}
+
+void test_cache_generation() {
+    std::cout << "Testing cache generation..." << std::endl;
+    
+    // Generate cache for epoch 0
+    auto cache = Ethash::calculateCache(0);
+    
+    // Cache should not be empty
+    assert(!cache.empty());
+    
+    // Cache size should match getCacheSize
+    uint64_t expectedSize = Ethash::getCacheSize(0);
+    size_t expectedItems = expectedSize / 64;
+    assert(cache.size() == expectedItems);
+    
+    // First cache item should be deterministic
+    // For epoch 0: seed = Keccak256(zeros)
+    // cache[0] = Keccak512(seed)
+    hash32_t seed{};
+    seed.fill(0);
+    hash32_t epoch0Seed = Keccak::keccak256(seed.data(), seed.size());
+    hash64_t expected_first = Keccak::keccak512(epoch0Seed.data(), epoch0Seed.size());
+    
+    // Note: actual cache[0] will differ after RandMemoHash rounds
+    // but we can check it's not all zeros
+    bool notZero = false;
+    for (size_t i = 0; i < cache[0].size(); ++i) {
+        if (cache[0][i] != 0) {
+            notZero = true;
+            break;
+        }
+    }
+    assert(notZero);
+    
+    std::cout << "  Cache items: " << cache.size() << std::endl;
+    std::cout << "  Expected items: " << expectedItems << std::endl;
+    std::cout << "✓ Cache generation test passed\n";
+}
+
 void test_dataset_size() {
     std::cout << "Testing dataset size calculation..." << std::endl;
     
@@ -157,8 +209,10 @@ int main() {
     
     try {
         test_epoch_calculation();
+        test_fnv_hash();
         test_dataset_size();
         test_cache_size();
+        test_cache_generation();
         
         std::cout << "\n✅ All tests passed!" << std::endl;
         return 0;
