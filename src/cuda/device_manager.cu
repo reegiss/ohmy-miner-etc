@@ -86,7 +86,8 @@ public:
         d_solutions_ = nullptr;
         d_solutionCount_ = nullptr;
         dagSize_ = 0;
-        stream_ = nullptr;
+        stream_compute_ = nullptr;
+        stream_memory_ = nullptr;
         startEvent_ = nullptr;
         stopEvent_ = nullptr;
         totalHashes_ = 0;
@@ -181,14 +182,17 @@ public:
         useTexture_ = false;
         texDAG_ = 0;
         
-        // Create CUDA stream for async operations
-        CUDA_CHECK(cudaStreamCreate(&stream_));
+        // Create TWO CUDA streams for overlapping compute and memory operations
+        // stream_compute_: Kernel execution (compute-bound work)
+        // stream_memory_: Memory transfers (DAG updates between jobs)
+        CUDA_CHECK(cudaStreamCreate(&stream_compute_));
+        CUDA_CHECK(cudaStreamCreate(&stream_memory_));
         
         // Create events for timing
         CUDA_CHECK(cudaEventCreate(&startEvent_));
         CUDA_CHECK(cudaEventCreate(&stopEvent_));
         
-        LOG_INFO("Device " + std::to_string(deviceId) + " initialized successfully");
+        LOG_INFO("Device " + std::to_string(deviceId) + " initialized successfully with 2-stream async pipeline");
         return true;
     }
 
@@ -202,17 +206,17 @@ public:
     ) {
         const uint32_t maxSolutions = 16;
         
-        // Reset solution counter
+        // Reset solution counter - use regular memcpy for correctness
         uint32_t zero = 0;
         CUDA_CHECK(cudaMemcpy(d_solutionCount_, &zero, sizeof(uint32_t), cudaMemcpyHostToDevice));
         
-        // Copy header, seedHash and target to device
+        // Copy header, seedHash and target to device using regular memcpy
         CUDA_CHECK(cudaMemcpy(d_header_, headerHash.data(), 32, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_seedHash_, seedHash.data(), 32, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_target_, targetBE, 32, cudaMemcpyHostToDevice));
         
-        // Start timing
-        CUDA_CHECK(cudaEventRecord(startEvent_, stream_));
+        // Start timing on compute stream
+        CUDA_CHECK(cudaEventRecord(startEvent_, stream_compute_));
         
         // Check for optimized kernel flag (env var OHMY_USE_OPTIMIZED_KERNEL=1)
         static int useOptimized = -1;
@@ -239,6 +243,7 @@ public:
         
         if (useOptimized) {
             // Use optimized kernel with advanced caching and high batching
+            // Kernel executes on stream_compute_
             launch_ethash_search_optimized(
                 reinterpret_cast<const uint64_t*>(d_dag_),
                 dagSize_,
@@ -251,10 +256,11 @@ public:
                 d_solutions_,
                 d_solutionCount_,
                 maxSolutions,
-                stream_
+                stream_compute_
             );
         } else {
             // Use base kernel (1 nonce per thread)
+            // Kernel executes on stream_compute_
             launch_ethash_search(
                 reinterpret_cast<const uint64_t*>(d_dag_),
                 dagSize_,
@@ -266,15 +272,15 @@ public:
                 d_solutions_,
                 d_solutionCount_,
                 maxSolutions,
-                stream_
+                stream_compute_
             );
         }
         
-        // Stop timing
-        CUDA_CHECK(cudaEventRecord(stopEvent_, stream_));
+        // Stop timing on compute stream
+        CUDA_CHECK(cudaEventRecord(stopEvent_, stream_compute_));
         
-        // Wait for kernel completion
-        CUDA_CHECK(cudaStreamSynchronize(stream_));
+        // Synchronize to ensure compute stream completes and results are ready
+        CUDA_CHECK(cudaStreamSynchronize(stream_compute_));
         
         // Calculate elapsed time
         float milliseconds = 0;
@@ -288,9 +294,10 @@ public:
         float currentHashrate = (count / 1000000.0f) / (milliseconds / 1000.0f);
         // LOG_INFO removed to reduce log frequency
         
-        // Get solution count
+        // Get solution count from device
         uint32_t numSolutions = 0;
-        CUDA_CHECK(cudaMemcpy(&numSolutions, d_solutionCount_, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&numSolutions, d_solutionCount_, sizeof(uint32_t), 
+                              cudaMemcpyDeviceToHost));
         
         if (numSolutions > 0) {
             // Limit to maxSolutions
@@ -361,9 +368,13 @@ private:
             cudaFree(d_target_);
             d_target_ = nullptr;
         }
-        if (stream_) {
-            cudaStreamDestroy(stream_);
-            stream_ = nullptr;
+        if (stream_compute_) {
+            cudaStreamDestroy(stream_compute_);
+            stream_compute_ = nullptr;
+        }
+        if (stream_memory_) {
+            cudaStreamDestroy(stream_memory_);
+            stream_memory_ = nullptr;
         }
         if (startEvent_) {
             cudaEventDestroy(startEvent_);
@@ -383,7 +394,12 @@ private:
     uint32_t* d_solutionCount_;
     void* d_target_;
     size_t dagSize_;
-    cudaStream_t stream_;
+    
+    // TWO CUDA streams for overlapping compute and memory operations
+    // stream_compute_: GPU kernel execution (compute-bound)
+    // stream_memory_: Host<->Device memory transfers (memory-bound)
+    cudaStream_t stream_compute_;
+    cudaStream_t stream_memory_;
     
     // Optimization flags and resources
     bool useTexture_;               // Whether texture memory is enabled
