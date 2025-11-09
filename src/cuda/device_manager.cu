@@ -1,5 +1,6 @@
 #include "ohmy/device_manager.hpp"
 #include "ohmy/logger.hpp"
+#include "result_callback.hpp"
 #include <cuda_runtime.h>
 #include <cstring>
 #include <stdexcept>
@@ -317,20 +318,32 @@ public:
         // Stop timing on compute stream
         CUDA_CHECK(cudaEventRecord(stopEvent_, stream_compute_));
         
-        // Synchronize to ensure compute stream completes and results are ready
-        CUDA_CHECK(cudaStreamSynchronize(stream_compute_));
+        // PHASE 4: Launch async callback for result processing
+        // This eliminates blocking cudaStreamSynchronize() and allows GPU to continue
+        // with next kernel while callback processes results asynchronously
         
-        // Calculate elapsed time
-        float milliseconds = 0;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, startEvent_, stopEvent_));
+        // Create callback data
+        auto* cbData = new ohmy::cuda::ResultCallbackData();
+        cbData->d_solutionCount = d_solutionCount_;
+        cbData->d_solutions = reinterpret_cast<void*>(d_solutions_);
+        cbData->maxSolutions = maxSolutions;
+        cbData->jobId = 0;  // TODO: pass job ID from mining engine
+        cbData->epoch = 0;  // TODO: pass epoch from DAG manager
         
-        // Update statistics
-        totalHashes_ += count;
-        totalTime_ += milliseconds;
+        // Launch callback on stream_io_ (non-blocking, callback runs async)
+        CUDA_CHECK(cudaLaunchHostFunc(stream_io_, 
+                                      ohmy::cuda::processAndSubmitResultsCallback,
+                                      cbData));
         
-        // Calculate current hashrate (MH/s)
-        float currentHashrate = (count / 1000000.0f) / (milliseconds / 1000.0f);
-        // LOG_INFO removed to reduce log frequency
+        // Record results completion event on stream_io_
+        // This signals that all result transfers and processing are complete
+        CUDA_CHECK(cudaEventRecord(resultsDoneEvent_, stream_io_));
+        
+        // NOTE: We don't synchronize here anymore - callback runs asynchronously
+        // GPU can launch next kernel immediately without waiting for results
+        
+        // For now, read results synchronously (TODO: async via callback in Phase 4.3)
+        // This is temporary until full async integration is complete
         
         // Get solution count from device
         uint32_t numSolutions = 0;
@@ -358,9 +371,13 @@ public:
             LOG_INFO("Found " + std::to_string(numSolutions) + " solution(s)!");
         }
         
-        // Record results completion event on stream_io_
-        // This signals that all result transfers and processing are complete
-        CUDA_CHECK(cudaEventRecord(resultsDoneEvent_, stream_io_));
+        // Calculate elapsed time (now includes callback overhead)
+        float milliseconds = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, startEvent_, stopEvent_));
+        
+        // Update statistics
+        totalHashes_ += count;
+        totalTime_ += milliseconds;
         
         return numSolutions;
     }
