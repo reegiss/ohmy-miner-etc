@@ -88,8 +88,12 @@ public:
         dagSize_ = 0;
         stream_compute_ = nullptr;
         stream_memory_ = nullptr;
+        stream_io_ = nullptr;  // Phase 3: Initialize new stream
         startEvent_ = nullptr;
         stopEvent_ = nullptr;
+        memoryDoneEvent_ = nullptr;    // Phase 3: Initialize sync events
+        kernelDoneEvent_ = nullptr;
+        resultsDoneEvent_ = nullptr;
         totalHashes_ = 0;
         totalTime_ = 0.0f;
         useTexture_ = false;
@@ -182,17 +186,24 @@ public:
         useTexture_ = false;
         texDAG_ = 0;
         
-        // Create TWO CUDA streams for overlapping compute and memory operations
+        // Create THREE CUDA streams for true 3-stream pipeline (Phase 3)
         // stream_compute_: Kernel execution (compute-bound work)
         // stream_memory_: Memory transfers (DAG updates between jobs)
+        // stream_io_: Network I/O and non-blocking operations (Phase 3 NEW)
         CUDA_CHECK(cudaStreamCreate(&stream_compute_));
         CUDA_CHECK(cudaStreamCreate(&stream_memory_));
+        CUDA_CHECK(cudaStreamCreate(&stream_io_));  // Phase 3: Added for 3-stream pipeline
         
         // Create events for timing
         CUDA_CHECK(cudaEventCreate(&startEvent_));
         CUDA_CHECK(cudaEventCreate(&stopEvent_));
         
-        LOG_INFO("Device " + std::to_string(deviceId) + " initialized successfully with 2-stream async pipeline");
+        // Phase 3: Create stream synchronization events for 3-stream pipeline
+        CUDA_CHECK(cudaEventCreate(&memoryDoneEvent_));
+        CUDA_CHECK(cudaEventCreate(&kernelDoneEvent_));
+        CUDA_CHECK(cudaEventCreate(&resultsDoneEvent_));
+        
+        LOG_INFO("Device " + std::to_string(deviceId) + " initialized successfully with 3-stream async pipeline (Phase 3)");
         return true;
     }
 
@@ -206,7 +217,11 @@ public:
     ) {
         const uint32_t maxSolutions = 16;
         
-        // PHASE 2: Use async memcpy on stream_memory_ for overlap potential
+        // PHASE 3: Use 3-stream pipeline with event synchronization
+        // Stream memory_: Async memcpy for data transfer
+        // Stream compute_: Kernel execution  
+        // Stream io_: Network/result processing
+        
         // Reset solution counter asynchronously on stream_memory_
         uint32_t zero = 0;
         CUDA_CHECK(cudaMemcpyAsync(d_solutionCount_, &zero, sizeof(uint32_t), 
@@ -221,14 +236,12 @@ public:
         CUDA_CHECK(cudaMemcpyAsync(d_target_, targetBE, 32, 
                                    cudaMemcpyHostToDevice, stream_memory_));
         
-        // Create event to signal completion of memory transfers on stream_memory_
-        cudaEvent_t memoryDoneEvent;
-        CUDA_CHECK(cudaEventCreate(&memoryDoneEvent));
-        CUDA_CHECK(cudaEventRecord(memoryDoneEvent, stream_memory_));
+        // Record event to signal completion of memory transfers on stream_memory_
+        CUDA_CHECK(cudaEventRecord(memoryDoneEvent_, stream_memory_));
         
         // Make stream_compute_ wait for memory transfers to complete before launching kernel
         // This ensures data is ready, but CPU thread continues immediately (non-blocking)
-        CUDA_CHECK(cudaStreamWaitEvent(stream_compute_, memoryDoneEvent));
+        CUDA_CHECK(cudaStreamWaitEvent(stream_compute_, memoryDoneEvent_));
         
         // Start timing on compute stream AFTER memory data is guaranteed to be ready
         CUDA_CHECK(cudaEventRecord(startEvent_, stream_compute_));
@@ -293,6 +306,14 @@ public:
             );
         }
         
+        // Record kernel completion event on stream_compute_
+        // This signals that all GPU work (kernel) is complete
+        CUDA_CHECK(cudaEventRecord(kernelDoneEvent_, stream_compute_));
+        
+        // Make stream_io_ wait for kernel completion before processing results
+        // This ensures kernelDoneEvent is recorded before sync
+        CUDA_CHECK(cudaStreamWaitEvent(stream_io_, kernelDoneEvent_));
+        
         // Stop timing on compute stream
         CUDA_CHECK(cudaEventRecord(stopEvent_, stream_compute_));
         
@@ -337,8 +358,9 @@ public:
             LOG_INFO("Found " + std::to_string(numSolutions) + " solution(s)!");
         }
         
-        // Clean up the memory done event
-        CUDA_CHECK(cudaEventDestroy(memoryDoneEvent));
+        // Record results completion event on stream_io_
+        // This signals that all result transfers and processing are complete
+        CUDA_CHECK(cudaEventRecord(resultsDoneEvent_, stream_io_));
         
         return numSolutions;
     }
@@ -396,6 +418,10 @@ private:
             cudaStreamDestroy(stream_memory_);
             stream_memory_ = nullptr;
         }
+        if (stream_io_) {
+            cudaStreamDestroy(stream_io_);
+            stream_io_ = nullptr;
+        }
         if (startEvent_) {
             cudaEventDestroy(startEvent_);
             startEvent_ = nullptr;
@@ -403,6 +429,18 @@ private:
         if (stopEvent_) {
             cudaEventDestroy(stopEvent_);
             stopEvent_ = nullptr;
+        }
+        if (memoryDoneEvent_) {
+            cudaEventDestroy(memoryDoneEvent_);
+            memoryDoneEvent_ = nullptr;
+        }
+        if (kernelDoneEvent_) {
+            cudaEventDestroy(kernelDoneEvent_);
+            kernelDoneEvent_ = nullptr;
+        }
+        if (resultsDoneEvent_) {
+            cudaEventDestroy(resultsDoneEvent_);
+            resultsDoneEvent_ = nullptr;
         }
     }
     
@@ -415,11 +453,13 @@ private:
     void* d_target_;
     size_t dagSize_;
     
-    // TWO CUDA streams for overlapping compute and memory operations
+    // THREE CUDA streams for overlapping compute, memory, and I/O operations
     // stream_compute_: GPU kernel execution (compute-bound)
     // stream_memory_: Host<->Device memory transfers (memory-bound)
+    // stream_io_: Network I/O and non-blocking operations (NEW for Phase 3)
     cudaStream_t stream_compute_;
     cudaStream_t stream_memory_;
+    cudaStream_t stream_io_;  // Phase 3: Added for true 3-stream pipeline
     
     // Optimization flags and resources
     bool useTexture_;               // Whether texture memory is enabled
@@ -428,6 +468,12 @@ private:
     // Timing and statistics
     cudaEvent_t startEvent_;
     cudaEvent_t stopEvent_;
+    
+    // Phase 3: Stream synchronization events for 3-stream pipeline
+    cudaEvent_t memoryDoneEvent_;      // Signals completion of memory transfers
+    cudaEvent_t kernelDoneEvent_;      // Signals completion of kernel execution
+    cudaEvent_t resultsDoneEvent_;     // Signals completion of result transfers
+    
     uint64_t totalHashes_;
     float totalTime_;  // milliseconds
 };
