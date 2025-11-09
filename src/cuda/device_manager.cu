@@ -426,6 +426,39 @@ public:
         
         LOG_INFO("Initializing device " + std::to_string(deviceId));
         
+        // PHASE 6.1: Determine optimal NUM_STREAMS based on available GPU memory
+        // Dynamic tuning: larger GPUs get more streams for better overlap
+        size_t freeMem, totalMem;
+        CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+        
+        // Each stream needs buffers: 32 (header) + 32 (seedHash) + 32 (target) + 
+        //                            sizeof(DeviceSolution)*16 (solutions) +
+        //                            sizeof(uint32_t) (count) = ~640 bytes device
+        // Plus host pinned: similar ~640 bytes
+        const size_t bufferPerStream = 640;  // Approximate per-stream overhead
+        
+        // Reserve 10% of free memory for other operations
+        size_t availableForStreams = (freeMem * 90) / 100;
+        int optimalStreams = std::max(2, static_cast<int>(availableForStreams / bufferPerStream));
+        
+        // Cap at reasonable maximum (too many streams adds overhead)
+        optimalStreams = std::min(optimalStreams, 8);
+        
+        // Allow override via environment variable
+        const char* streamsEnv = std::getenv("OHMY_NUM_STREAMS");
+        int numStreams = streamsEnv ? std::atoi(streamsEnv) : optimalStreams;
+        
+        // Clamp to valid range
+        numStreams = std::max(2, std::min(numStreams, 8));
+        
+        LOG_INFO("GPU memory: " + std::to_string(totalMem / (1024*1024)) + " MB total, " +
+                 std::to_string(freeMem / (1024*1024)) + " MB free");
+        LOG_INFO("Optimal NUM_STREAMS: " + std::to_string(optimalStreams) + 
+                 " (using " + std::to_string(numStreams) + 
+                 ", override with OHMY_NUM_STREAMS env var)");
+        
+        dynamicNumStreams_ = numStreams;
+        
         // Allocate GPU memory for DAG
         dagSize_ = dagSize;
         CUDA_CHECK(cudaMalloc(&d_dag_, dagSize));
@@ -456,8 +489,8 @@ public:
         // PHASE 6: Allocate N-buffered host and device memory for async pipeline
         const uint32_t maxSolutions = 16;
         
-        // Allocate NUM_STREAMS copies of each buffer
-        for (int i = 0; i < NUM_STREAMS; i++) {
+        // Allocate dynamicNumStreams_ copies of each buffer
+        for (int i = 0; i < dynamicNumStreams_; i++) {
             // Allocate PINNED host memory for async transfers
             uint8_t* h_header = nullptr;
             uint8_t* h_seedHash = nullptr;
@@ -477,7 +510,7 @@ public:
             h_solutionCounts_.push_back(h_solutionCount);
             h_solutions_vec_.push_back(h_solution);
             
-            // Allocate device memory (NUM_STREAMS copies)
+            // Allocate device memory (dynamicNumStreams_ copies)
             uint8_t* d_header = nullptr;
             uint8_t* d_seedHash = nullptr;
             uint8_t* d_target = nullptr;
@@ -497,8 +530,8 @@ public:
             d_solutions_vec_.push_back(d_solution);
         }
         
-        // Create NUM_STREAMS CUDA streams and events for N-buffering
-        for (int i = 0; i < NUM_STREAMS; i++) {
+        // Create dynamicNumStreams_ CUDA streams and events for N-buffering
+        for (int i = 0; i < dynamicNumStreams_; i++) {
             cudaStream_t stream = nullptr;
             cudaEvent_t event = nullptr;
             CUDA_CHECK(cudaStreamCreate(&stream));
@@ -507,9 +540,9 @@ public:
             events_.push_back(event);
         }
         
-        LOG_INFO("PHASE 6: Initialized N-stream pipeline with " + std::to_string(NUM_STREAMS) + 
-                 " streams, " + std::to_string(NUM_STREAMS) + " pinned host buffers, and " + 
-                 std::to_string(NUM_STREAMS) + " device buffer sets");
+        LOG_INFO("PHASE 6: Initialized N-stream pipeline with " + std::to_string(dynamicNumStreams_) + 
+                 " streams, " + std::to_string(dynamicNumStreams_) + " pinned host buffers, and " + 
+                 std::to_string(dynamicNumStreams_) + " device buffer sets");
         
         // Legacy single-buffer allocations (kept for backward compatibility)
         // Allocate device memory for header and seedHash
@@ -767,7 +800,7 @@ public:
         if (eventStatus == cudaErrorNotReady) {
             // Previous work still in flight on this stream, nothing to do
             // Advance to next stream for the next call
-            streamIdx_ = (streamIdx_ + 1) % NUM_STREAMS;
+            streamIdx_ = (streamIdx_ + 1) % dynamicNumStreams_;
             return 0;  // No work processed this tick
         }
         
@@ -880,7 +913,7 @@ public:
         CUDA_CHECK(cudaEventRecord(event, stream));
         
         // STEP 7: Advance to next stream for next call (round-robin)
-        streamIdx_ = (streamIdx_ + 1) % NUM_STREAMS;
+        streamIdx_ = (streamIdx_ + 1) % dynamicNumStreams_;
         
         // Update statistics
         totalHashes_ += count;
@@ -1566,20 +1599,22 @@ private:
     size_t dagSize_;
     
     // PHASE 6: N-Stream Pipeline Architecture (Multi-Buffering)
-    // NUM_STREAMS = 3: Allows overlapping of 3 independent work items
+    // NUM_STREAMS = 3: Default static value
+    // dynamicNumStreams_: Runtime value (can be 2-8 based on GPU memory)
     // Each stream has its own buffers to avoid dependencies
     static constexpr int NUM_STREAMS = 3;
+    int dynamicNumStreams_ = NUM_STREAMS;  // PHASE 6.1: Dynamic tuning based on GPU memory
     
     // Duplicated host buffers for N-buffering (pinned memory for async transfers)
-    std::vector<uint8_t*> h_headers_;           // NUM_STREAMS host pinned buffers for headers
-    std::vector<uint8_t*> h_seedHashes_;        // NUM_STREAMS host pinned buffers for seedHashes
-    std::vector<uint8_t*> h_targets_;           // NUM_STREAMS host pinned buffers for targets
-    std::vector<uint32_t*> h_solutionCounts_;   // NUM_STREAMS host pinned buffers for solution counts
-    std::vector<DeviceSolution*> h_solutions_vec_;  // NUM_STREAMS host pinned buffers for solutions
+    std::vector<uint8_t*> h_headers_;           // dynamicNumStreams_ host pinned buffers for headers
+    std::vector<uint8_t*> h_seedHashes_;        // dynamicNumStreams_ host pinned buffers for seedHashes
+    std::vector<uint8_t*> h_targets_;           // dynamicNumStreams_ host pinned buffers for targets
+    std::vector<uint32_t*> h_solutionCounts_;   // dynamicNumStreams_ host pinned buffers for solution counts
+    std::vector<DeviceSolution*> h_solutions_vec_;  // dynamicNumStreams_ host pinned buffers for solutions
     
     // Duplicated device buffers for N-buffering
-    std::vector<uint8_t*> d_headers_vec_;           // NUM_STREAMS device buffers for headers
-    std::vector<uint8_t*> d_seedHashes_vec_;        // NUM_STREAMS device buffers for seedHashes
+    std::vector<uint8_t*> d_headers_vec_;           // dynamicNumStreams_ device buffers for headers
+    std::vector<uint8_t*> d_seedHashes_vec_;        // dynamicNumStreams_ device buffers for seedHashes
     std::vector<uint8_t*> d_targets_vec_;           // NUM_STREAMS device buffers for targets
     std::vector<uint32_t*> d_solutionCounts_vec_;   // NUM_STREAMS device buffers for solution counts
     std::vector<DeviceSolution*> d_solutions_vec_;  // NUM_STREAMS device buffers for solutions (POD struct)
