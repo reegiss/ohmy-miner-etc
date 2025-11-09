@@ -228,16 +228,95 @@ Estimated total potential: **35-50% gain over current baseline** with all optimi
 
 ## Conclusion
 
-CUDA texture memory for DAG access is **extremely effective** for Ethash mining:
-- ✅ **+226% performance gain** (small DAG benchmark)
+### Synthetic Benchmark (64KB DAG): ✅ EXCELLENT
+CUDA texture memory for DAG access delivers exceptional gains:
+- ✅ **+226% performance gain** (64KB test DAG)
+- ✅ Hashrate: 26.28 MH/s vs 7.77 MH/s (batching)
 - ✅ Consistent, reproducible results
 - ✅ Clean implementation using modern CUDA API
-- ✅ Zero functional regressions (all tests pass)
-- ✅ Simple toggle via environment variable
 
-This optimization alone transforms the miner's performance profile. Combined with previous batching work, the texture memory implementation represents a major leap forward in GPU mining efficiency.
+### Production Testing (4GB DAG): ❌ BLOCKED
+Texture memory binding fails with production DAG:
+```
+ERROR: Failed to create texture object: invalid argument
+```
 
-**Recommended for production use** pending real-world DAG validation.
+**Root Cause**: CUDA linear texture memory has size limitations. The current implementation uses `cudaResourceTypeLinear` which cannot handle 4GB+ buffers. Linear textures are typically limited to ~2GB on most GPUs.
+
+**Evidence from Production Test**:
+- ✅ DAG loads successfully to GPU (4136 MB)
+- ✅ Texture object creation attempted
+- ❌ Binding fails with "invalid argument"
+- ❌ Fallback works (optimized kernel still runs)
+- ❌ Cannot measure real-world texture performance
+
+---
+
+## Recommendation
+
+### ❌ NOT RECOMMENDED FOR PRODUCTION
+
+While the synthetic benchmark shows +226% gains, the implementation **does not work with real-world Ethash DAGs**:
+
+1. **Fundamental Limitation**: Linear texture memory cannot bind 4GB+ data
+2. **No Fallback Benefit**: When binding fails, code falls back to regular optimized kernel
+3. **Added Complexity**: Texture infrastructure adds code complexity with zero production benefit
+4. **Alternative Approaches** would be needed:
+   - Array textures (separate 2D array binding) - complex
+   - Multiple texture objects (segmented DAG) - very complex
+   - L2 cache optimization (no API control) - limited
+   - Unified memory (cudaMemAdvise) - limited to newer GPUs
+
+### Current Best Solution: Optimized Kernel (7.4 MH/s)
+The batching + shared memory optimization (no texture) remains the best practical solution:
+- ✅ Works with full-size DAGs
+- ✅ Simple, maintainable implementation
+- ✅ +17% improvement over baseline
+- ✅ Production-proven
+
+---
+
+## Technical Details on Texture Binding Failure
+
+### Why Linear Texture Memory Fails at 4GB
+
+CUDA linear textures have internal size limitations:
+```cpp
+// Current implementation (FAILS with 4GB DAG)
+cudaResourceDesc resDesc;
+resDesc.resType = cudaResourceTypeLinear;          // ← Linear type has ~2GB limit
+resDesc.res.linear.devPtr = d_dag_;                // 4136 MB (exceeds limit)
+resDesc.res.linear.sizeInBytes = dagSize;          // Too large!
+```
+
+The CUDA driver rejects the binding because the buffer exceeds internal limits for linear texture addressing.
+
+### Why 64KB Test Succeeded
+
+64KB DAG fits easily within linear texture limits, which is why the synthetic benchmark showed excellent performance. This was misleading as a proxy for production performance.
+
+---
+
+## Conclusion
+
+### Synthetic Benchmark (64KB DAG): ✅ EXCELLENT
+CUDA texture memory for DAG access delivers exceptional gains in controlled conditions:
+- ✅ **+226% performance gain** (64KB test DAG)
+- ✅ Hashrate: 26.28 MH/s vs 7.77 MH/s (batching)
+- ✅ Consistent, reproducible results
+- ✅ Clean implementation using modern CUDA API
+- ⚠️ **NOT representative of production DAG sizes**
+
+### Production Testing (4GB DAG): ❌ FAILURE
+- ❌ Texture binding fails with "invalid argument"
+- ❌ Cannot be used with real Ethash mining
+- ❌ Fallback to regular optimized kernel (no performance gain)
+
+### Final Verdict: **REVERT TEXTURE MEMORY**
+
+The texture memory optimization, while theoretically sound and well-implemented, cannot be deployed to production due to CUDA architectural limitations with large buffers.
+
+**Recommendation**: Keep the optimized kernel (+17% batching) as the primary implementation and remove texture memory code to reduce complexity.
 
 ---
 
