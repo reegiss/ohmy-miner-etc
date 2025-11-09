@@ -206,16 +206,31 @@ public:
     ) {
         const uint32_t maxSolutions = 16;
         
-        // Reset solution counter - use regular memcpy for correctness
+        // PHASE 2: Use async memcpy on stream_memory_ for overlap potential
+        // Reset solution counter asynchronously on stream_memory_
         uint32_t zero = 0;
-        CUDA_CHECK(cudaMemcpy(d_solutionCount_, &zero, sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_solutionCount_, &zero, sizeof(uint32_t), 
+                                   cudaMemcpyHostToDevice, stream_memory_));
         
-        // Copy header, seedHash and target to device using regular memcpy
-        CUDA_CHECK(cudaMemcpy(d_header_, headerHash.data(), 32, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_seedHash_, seedHash.data(), 32, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_target_, targetBE, 32, cudaMemcpyHostToDevice));
+        // Copy header, seedHash and target to device asynchronously on stream_memory_
+        // This allows stream_compute_ to prepare while memory transfers happen
+        CUDA_CHECK(cudaMemcpyAsync(d_header_, headerHash.data(), 32, 
+                                   cudaMemcpyHostToDevice, stream_memory_));
+        CUDA_CHECK(cudaMemcpyAsync(d_seedHash_, seedHash.data(), 32, 
+                                   cudaMemcpyHostToDevice, stream_memory_));
+        CUDA_CHECK(cudaMemcpyAsync(d_target_, targetBE, 32, 
+                                   cudaMemcpyHostToDevice, stream_memory_));
         
-        // Start timing on compute stream
+        // Create event to signal completion of memory transfers on stream_memory_
+        cudaEvent_t memoryDoneEvent;
+        CUDA_CHECK(cudaEventCreate(&memoryDoneEvent));
+        CUDA_CHECK(cudaEventRecord(memoryDoneEvent, stream_memory_));
+        
+        // Make stream_compute_ wait for memory transfers to complete before launching kernel
+        // This ensures data is ready, but CPU thread continues immediately (non-blocking)
+        CUDA_CHECK(cudaStreamWaitEvent(stream_compute_, memoryDoneEvent));
+        
+        // Start timing on compute stream AFTER memory data is guaranteed to be ready
         CUDA_CHECK(cudaEventRecord(startEvent_, stream_compute_));
         
         // Check for optimized kernel flag (env var OHMY_USE_OPTIMIZED_KERNEL=1)
@@ -319,6 +334,9 @@ public:
             
             LOG_INFO("Found " + std::to_string(numSolutions) + " solution(s)!");
         }
+        
+        // Clean up the memory done event
+        CUDA_CHECK(cudaEventDestroy(memoryDoneEvent));
         
         return numSolutions;
     }
