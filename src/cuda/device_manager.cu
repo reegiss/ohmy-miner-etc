@@ -175,38 +175,11 @@ public:
         // Allocate device memory for 256-bit target (big-endian)
         CUDA_CHECK(cudaMalloc(&d_target_, 32));
         
-        // Check if texture memory should be used
-        const char* texEnv = std::getenv("OHMY_USE_TEXTURE_MEMORY");
-        useTexture_ = (texEnv && std::string(texEnv) == "1");
-        
-        // Create texture object for DAG if enabled
-        if (useTexture_) {
-            // Configure resource descriptor
-            // DAG is stored as uint64_t but we access as uint2 (2x uint32_t)
-            cudaResourceDesc resDesc;
-            memset(&resDesc, 0, sizeof(resDesc));
-            resDesc.resType = cudaResourceTypeLinear;
-            resDesc.res.linear.devPtr = d_dag_;
-            resDesc.res.linear.desc = cudaCreateChannelDesc(32, 32, 0, 0, cudaChannelFormatKindUnsigned);
-            resDesc.res.linear.sizeInBytes = dagSize;
-            
-            // Configure texture descriptor
-            cudaTextureDesc texDesc;
-            memset(&texDesc, 0, sizeof(texDesc));
-            texDesc.readMode = cudaReadModeElementType;
-            
-            // Create the texture object
-            cudaError_t err = cudaCreateTextureObject(&texDAG_, &resDesc, &texDesc, nullptr);
-            if (err != cudaSuccess) {
-                LOG_ERROR("Failed to create texture object: " + std::string(cudaGetErrorString(err)));
-                useTexture_ = false;
-                texDAG_ = 0;
-            } else {
-                LOG_INFO("DAG bound to texture object for optimized cache access");
-            }
-        } else {
-            texDAG_ = 0;  // No texture object
-        }
+        // Texture memory support disabled due to CUDA linear texture size limitations
+        // (cannot bind 4GB+ buffers needed for production Ethash DAGs)
+        // See: docs/TEXTURE_MEMORY_RESULTS.md for detailed analysis
+        useTexture_ = false;
+        texDAG_ = 0;
         
         // Create CUDA stream for async operations
         CUDA_CHECK(cudaStreamCreate(&stream_));
@@ -249,9 +222,6 @@ public:
             const char* env = std::getenv("OHMY_USE_OPTIMIZED_KERNEL");
             useOptimized = (env && std::string(env) == "1") ? 1 : 0;
             
-            const char* texEnv = std::getenv("OHMY_USE_TEXTURE_MEMORY");
-            useTexture = (texEnv && std::string(texEnv) == "1") ? 1 : 0;
-            
             // Allow custom noncesPerThread via env var for experimentation
             const char* batchEnv = std::getenv("OHMY_NONCES_PER_THREAD");
             if (batchEnv) {
@@ -261,32 +231,13 @@ public:
                 }
             }
             
-            if (useTexture) {
-                LOG_INFO("Using texture memory kernel (noncesPerThread=" + 
-                         std::to_string(noncesPerThread) + ")");
-            } else if (useOptimized) {
+            if (useOptimized) {
                 LOG_INFO("Using optimized kernel with batching (noncesPerThread=" + 
                          std::to_string(noncesPerThread) + ")");
             }
         }
         
-        if (useTexture && useTexture_) {
-            // Use texture memory kernel
-            launch_ethash_search_texture(
-                texDAG_,
-                dagSize_,
-                reinterpret_cast<const uint32_t*>(d_header_),
-                reinterpret_cast<const uint32_t*>(d_seedHash_),
-                reinterpret_cast<const uint8_t*>(d_target_),
-                startNonce,
-                count,
-                noncesPerThread,
-                d_solutions_,
-                d_solutionCount_,
-                maxSolutions,
-                stream_
-            );
-        } else if (useOptimized) {
+        if (useOptimized) {
             // Use optimized kernel with advanced caching and high batching
             launch_ethash_search_optimized(
                 reinterpret_cast<const uint64_t*>(d_dag_),
