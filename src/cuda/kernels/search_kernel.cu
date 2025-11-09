@@ -445,7 +445,7 @@ extern "C" void launch_ethash_search_optimized(
     cudaStream_t stream
 ) {
     // Calculate grid dimensions with batching
-    const int threadsPerBlock = 256;
+    const int threadsPerBlock = 512;  // Optimized for CC 7.5: 50% occupancy provides best latency hiding
     const int totalThreads = (searchCount + noncesPerThread - 1) / noncesPerThread;
     const int blocks = (totalThreads + threadsPerBlock - 1) / threadsPerBlock;
     
@@ -482,7 +482,7 @@ extern "C" void launch_ethash_search_texture(
     cudaStream_t stream
 ) {
     // Calculate grid dimensions with batching
-    const int threadsPerBlock = 256;
+    const int threadsPerBlock = 1024;  // Max occupancy (100% of SM capacity on CC 7.5)
     const int totalThreads = (searchCount + noncesPerThread - 1) / noncesPerThread;
     const int blocks = (totalThreads + threadsPerBlock - 1) / threadsPerBlock;
     
@@ -561,7 +561,7 @@ extern "C" void launch_ethash_search(
     cudaStream_t stream
 ) {
     // Calculate grid dimensions
-    const int threadsPerBlock = 256;
+    const int threadsPerBlock = 1024;  // Max occupancy (100% of SM capacity on CC 7.5)
     const int blocks = (searchCount + threadsPerBlock - 1) / threadsPerBlock;
     
     // Launch kernel

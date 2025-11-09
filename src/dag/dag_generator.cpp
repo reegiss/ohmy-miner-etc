@@ -97,6 +97,11 @@ public:
             
             if (useGpu) {
                 // Allocate GPU memory for DAG
+                // Log GPU memory usage before and after DAG allocation
+                size_t freeMem, totalMem;
+                CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+                LOG_INFO("GPU memory before DAG allocation: " + std::to_string(freeMem / (1024 * 1024)) + " MB free");
+
                 err = cudaMalloc(&d_dag, dagSize_);
                 if (err != cudaSuccess) {
                     LOG_ERROR("  Failed to allocate GPU DAG memory: " + std::string(cudaGetErrorString(err)));
@@ -104,6 +109,9 @@ public:
                     LOG_WARN("  Falling back to CPU generation");
                     useGpu = false;
                 }
+
+                CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+                LOG_INFO("GPU memory after DAG allocation: " + std::to_string(freeMem / (1024 * 1024)) + " MB free");
             }
             
             if (useGpu) {

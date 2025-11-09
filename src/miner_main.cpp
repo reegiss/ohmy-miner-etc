@@ -462,6 +462,18 @@ int main(int argc, char* argv[]) {
             // The searchAsync() function is non-blocking and uses event queries to pace the loop
             // CPU can spin very fast since most time is spent on GPU kernels executing in parallel
             std::this_thread::sleep_for(1us);
+
+            // Add CPU usage throttling to reduce high CPU load
+            static int throttleCounter = 0;
+            if (++throttleCounter % 1000 == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            // Reduce CPU load by adding a sleep interval in the mining loop
+            static int miningLoopCounter = 0;
+            if (++miningLoopCounter % 500 == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
         }
         
         // Cleanup

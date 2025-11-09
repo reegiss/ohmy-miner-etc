@@ -501,7 +501,17 @@ public:
             uint32_t* h_solutionCount = nullptr;
             DeviceSolution* h_solution = nullptr;
             
+            // Add profiling to measure memory allocation time
+            auto allocStart = std::chrono::high_resolution_clock::now();
             CUDA_CHECK(cudaHostAlloc(&h_header, 32, cudaHostAllocDefault));
+            auto allocEnd = std::chrono::high_resolution_clock::now();
+            LOG_DEBUG("Pinned memory allocation time: " + std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(allocEnd - allocStart).count()) + " us");
+
+            // Add a warning if memory usage exceeds a threshold
+            if (freeMem < (totalMem * 0.1)) {
+                LOG_WARN("Free memory is below 10% of total GPU memory. Performance may degrade.");
+            }
+            
             CUDA_CHECK(cudaHostAlloc(&h_seedHash, 32, cudaHostAllocDefault));
             CUDA_CHECK(cudaHostAlloc(&h_target, 32, cudaHostAllocDefault));
             CUDA_CHECK(cudaHostAlloc(&h_solutionCount, sizeof(uint32_t), cudaHostAllocDefault));
