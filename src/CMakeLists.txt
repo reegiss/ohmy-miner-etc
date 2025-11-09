@@ -17,6 +17,8 @@ set(CUDA_SOURCES
     cuda/dag_kernel.cu
     cuda/kernels/ethash_kernel.cu
     cuda/kernels/search_kernel.cu
+    cuda/kernels/search_kernel_warp.cu
+    cuda/kernels/keccak_constants.cu
 )
 
 # Create executable

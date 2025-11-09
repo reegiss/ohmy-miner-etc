@@ -54,6 +54,8 @@ add_executable(bench_cuda
     ${PROJECT_SOURCE_DIR}/src/core/keccak.cpp
     ${PROJECT_SOURCE_DIR}/src/cuda/device_manager.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel_warp.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/kernels/keccak_constants.cu
 )
 
 target_link_libraries(bench_cuda PRIVATE ${CUDA_LIBRARIES} Threads::Threads)

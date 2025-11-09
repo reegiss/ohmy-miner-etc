@@ -1,0 +1,31 @@
+#include <cuda_runtime.h>
+#include <cstdint>
+
+namespace ohmy {
+namespace cuda {
+
+// FNV prime constant - defined once
+__constant__ uint32_t c_fnv_prime = 0x01000193u;
+
+// Keccak constants - defined once
+__constant__ uint64_t c_keccak_round_constants[24] = {
+    0x0000000000000001ULL, 0x0000000000008082ULL, 0x800000000000808aULL,
+    0x8000000080008000ULL, 0x000000000000808bULL, 0x0000000080000001ULL,
+    0x8000000080008081ULL, 0x8000000000008009ULL, 0x000000000000008aULL,
+    0x0000000000000088ULL, 0x0000000080008009ULL, 0x000000008000000aULL,
+    0x000000008000808bULL, 0x800000000000008bULL, 0x8000000000008089ULL,
+    0x8000000000008003ULL, 0x8000000000008002ULL, 0x8000000000000080ULL,
+    0x000000000000800aULL, 0x800000008000000aULL, 0x8000000080008081ULL,
+    0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL
+};
+
+__constant__ int c_keccak_rotation_offsets[25] = {
+     0,  1, 62, 28, 27,
+    36, 44,  6, 55, 20,
+     3, 10, 43, 25, 39,
+    41, 45, 15, 21,  8,
+    18,  2, 61, 56, 14
+};
+
+} // namespace cuda
+} // namespace ohmy
