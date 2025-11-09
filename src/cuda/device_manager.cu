@@ -369,6 +369,7 @@ public:
         resultsDoneEvent_ = nullptr;
         totalHashes_ = 0;
         totalTime_ = 0.0f;
+        pipelineStartTime_ = std::chrono::steady_clock::now();  // PHASE 6: Track when mining started
         useTexture_ = false;
         texDAG_ = 0;
         stratumClient_ = nullptr;
@@ -426,9 +427,22 @@ public:
         
         LOG_INFO("Initializing device " + std::to_string(deviceId));
         
-        // PHASE 6.1: Determine optimal NUM_STREAMS based on available GPU memory
-        // Dynamic tuning: larger GPUs get more streams for better overlap
+        // Get GPU memory info BEFORE DAG allocation
         size_t freeMem, totalMem;
+        CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+        LOG_INFO("GPU memory: " + std::to_string(totalMem / (1024*1024)) + " MB total, " +
+                 std::to_string(freeMem / (1024*1024)) + " MB free");
+        
+        // Allocate GPU memory for DAG
+        dagSize_ = dagSize;
+        CUDA_CHECK(cudaMalloc(&d_dag_, dagSize));
+        
+        // Copy DAG to GPU
+        LOG_INFO("Copying DAG to GPU (" + std::to_string(dagSize / (1024*1024)) + " MB)");
+        CUDA_CHECK(cudaMemcpy(d_dag_, dag, dagSize, cudaMemcpyHostToDevice));
+        
+        // PHASE 6.1: Determine optimal NUM_STREAMS based on REMAINING GPU memory (AFTER DAG allocation)
+        // Dynamic tuning: larger GPUs get more streams for better overlap
         CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
         
         // Each stream needs buffers: 32 (header) + 32 (seedHash) + 32 (target) + 
@@ -451,23 +465,12 @@ public:
         // Clamp to valid range
         numStreams = std::max(2, std::min(numStreams, 8));
         
-        LOG_INFO("GPU memory: " + std::to_string(totalMem / (1024*1024)) + " MB total, " +
-                 std::to_string(freeMem / (1024*1024)) + " MB free");
+        LOG_INFO("After DAG: " + std::to_string(freeMem / (1024*1024)) + " MB free");
         LOG_INFO("Optimal NUM_STREAMS: " + std::to_string(optimalStreams) + 
                  " (using " + std::to_string(numStreams) + 
                  ", override with OHMY_NUM_STREAMS env var)");
         
         dynamicNumStreams_ = numStreams;
-        
-        // Allocate GPU memory for DAG
-        dagSize_ = dagSize;
-        CUDA_CHECK(cudaMalloc(&d_dag_, dagSize));
-        
-        // Copy DAG to GPU
-        LOG_INFO("Copying DAG to GPU (" + std::to_string(dagSize / (1024*1024)) + " MB)");
-        CUDA_CHECK(cudaMemcpy(d_dag_, dag, dagSize, cudaMemcpyHostToDevice));
-        
-        // Verify DAG was loaded (log first 32 bytes and item 8)
         {
             const uint64_t* dagHost = static_cast<const uint64_t*>(dag);
             std::stringstream ss;
@@ -534,10 +537,18 @@ public:
         for (int i = 0; i < dynamicNumStreams_; i++) {
             cudaStream_t stream = nullptr;
             cudaEvent_t event = nullptr;
+            cudaEvent_t startEvent = nullptr;
+            cudaEvent_t stopEvent = nullptr;
+            
             CUDA_CHECK(cudaStreamCreate(&stream));
             CUDA_CHECK(cudaEventCreate(&event));
+            CUDA_CHECK(cudaEventCreate(&startEvent));
+            CUDA_CHECK(cudaEventCreate(&stopEvent));
+            
             streams_.push_back(stream);
             events_.push_back(event);
+            streamStartEvents_.push_back(startEvent);
+            streamStopEvents_.push_back(stopEvent);
         }
         
         LOG_INFO("PHASE 6: Initialized N-stream pipeline with " + std::to_string(dynamicNumStreams_) + 
@@ -860,6 +871,9 @@ public:
                                    cudaMemcpyHostToDevice, stream));
         CUDA_CHECK(cudaMemsetAsync(d_solutionCounts_vec_[i], 0, sizeof(uint32_t), stream));
         
+        // Record timing start event for this stream
+        CUDA_CHECK(cudaEventRecord(streamStartEvents_[i], stream));
+        
         // STEP 5: Launch kernel on this stream
         // Determine which kernel to use
         static int useOptimized = -1;
@@ -908,6 +922,9 @@ public:
             );
         }
         
+        // Record timing stop event for this stream
+        CUDA_CHECK(cudaEventRecord(streamStopEvents_[i], stream));
+        
         // STEP 6: Record completion event for this work
         // Next call to searchAsync() will check this event and process results
         CUDA_CHECK(cudaEventRecord(event, stream));
@@ -918,17 +935,35 @@ public:
         // Update statistics
         totalHashes_ += count;
         
+        // Measure time from timing events (non-blocking - events may still be in flight)
+        // We'll accumulate approximate timing based on events that complete
+        if (streamStartEvents_[i] && streamStopEvents_[i]) {
+            cudaError_t eventStatus = cudaEventQuery(streamStopEvents_[i]);
+            if (eventStatus == cudaSuccess) {
+                // Event complete - measure time
+                float milliseconds = 0;
+                CUDA_CHECK(cudaEventElapsedTime(&milliseconds, streamStartEvents_[i], streamStopEvents_[i]));
+                totalTime_ += milliseconds;
+            }
+            // If event not ready yet (cudaErrorNotReady), we skip timing for now
+            // It will be measured in a future call
+        }
+        
         return numSolutions;  // Return solutions from the PREVIOUS work
     }
 
     uint64_t getHashRate(int deviceId) const {
         // Calculate average hashrate in H/s (hashes per second)
-        if (totalTime_ <= 0.0f) {
+        // PHASE 6: Use wall-clock time for more accurate measurement during async pipeline
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - pipelineStartTime_).count();
+        
+        if (elapsed <= 0) {
             return 0;
         }
         
-        // totalTime_ is in milliseconds, convert to seconds
-        float seconds = totalTime_ / 1000.0f;
+        // Convert to seconds
+        double seconds = elapsed / 1000.0;
         uint64_t hashrate = static_cast<uint64_t>(totalHashes_ / seconds);
         
         return hashrate;
@@ -1521,9 +1556,15 @@ private:
         for (int i = 0; i < static_cast<int>(streams_.size()); i++) {
             if (streams_[i]) cudaStreamDestroy(streams_[i]);
             if (events_[i]) cudaEventDestroy(events_[i]);
+            if (streamStartEvents_.size() > static_cast<size_t>(i) && streamStartEvents_[i]) 
+                cudaEventDestroy(streamStartEvents_[i]);
+            if (streamStopEvents_.size() > static_cast<size_t>(i) && streamStopEvents_[i]) 
+                cudaEventDestroy(streamStopEvents_[i]);
         }
         streams_.clear();
         events_.clear();
+        streamStartEvents_.clear();
+        streamStopEvents_.clear();
         
         // Destroy texture object if it was created
         if (texDAG_ != 0) {
@@ -1622,6 +1663,8 @@ private:
     // Stream management for multi-buffering
     std::vector<cudaStream_t> streams_;         // NUM_STREAMS CUDA streams
     std::vector<cudaEvent_t> events_;           // NUM_STREAMS completion events
+    std::vector<cudaEvent_t> streamStartEvents_;  // NUM_STREAMS timing start events
+    std::vector<cudaEvent_t> streamStopEvents_;   // NUM_STREAMS timing stop events
     int streamIdx_ = 0;                         // Current stream index (round-robin)
     
     // Legacy single-buffer support (kept for backward compatibility)
@@ -1642,6 +1685,9 @@ private:
     cudaEvent_t memoryDoneEvent_;      // Signals completion of memory transfers
     cudaEvent_t kernelDoneEvent_;      // Signals completion of kernel execution
     cudaEvent_t resultsDoneEvent_;     // Signals completion of result transfers
+    
+    // PHASE 6: Timing tracking for async pipeline
+    std::chrono::steady_clock::time_point pipelineStartTime_;  // When pipeline started
     
     uint64_t totalHashes_;
     float totalTime_;  // milliseconds

@@ -422,7 +422,16 @@ int main(int argc, char* argv[]) {
                 }
                 
                 // Get difficulty in G format
-                double diffG = lastDifficulty / 1e9;
+                // Note: difficulty from pool is in units of 2^32 nonces per share
+                // For display: show as difficulty (no conversion for small values like 2)
+                // For large values: show in G (gigahashes = 1e9)
+                double diffValue = static_cast<double>(lastDifficulty);
+                std::ostringstream diffStream;
+                if (diffValue >= 1e9) {
+                    diffStream << std::fixed << std::setprecision(2) << (diffValue / 1e9) << " G";
+                } else {
+                    diffStream << std::fixed << std::setprecision(0) << diffValue;
+                }
                 
                 // Format hashrate in MH/s
                 std::ostringstream hashStream;
@@ -436,7 +445,7 @@ int main(int argc, char* argv[]) {
                 std::cout << " ---------------------\n";
                 
                 std::ostringstream poolLine;
-                poolLine << "Mining at " << config.poolUrl << ", diff: " << std::fixed << std::setprecision(2) << diffG << " G";
+                poolLine << "Mining at " << config.poolUrl << ", diff: " << diffStream.str();
                 LOG_INFO(poolLine.str());
                 
                 std::ostringstream gpuLine;
