@@ -1,10 +1,6 @@
 #include "result_callback.hpp"
-
-#include <cuda_runtime.h>
-#include <chrono>
-#include <sstream>
-#include <cstring>
-#include <iostream>
+#include "ohmy/stratum_client.hpp"
+#include "ohmy/logger.hpp"
 
 namespace ohmy::cuda {
 
@@ -15,7 +11,7 @@ thread_local bool CallbackErrorTracker::hasError = false;
 void CallbackErrorTracker::recordError(const std::string& error) {
     lastError = error;
     hasError = true;
-    // LOG_ERROR("[Callback] " + error);  // TODO: conditional logging
+    LOG_ERROR("[Callback] " + error);
 }
 
 std::string CallbackErrorTracker::getLastError() {
@@ -28,10 +24,13 @@ void CallbackErrorTracker::clearError() {
 }
 
 /**
- * Phase 4: Async callback for result processing
+ * Phase 4.3: Async callback for pool submission
  * 
- * This callback is invoked asynchronously after the GPU kernel completes.
- * It runs on the CUDA callback thread and handles result processing.
+ * This callback is invoked asynchronously to submit already-processed solutions
+ * to the mining pool. Solutions are already copied from device to host before
+ * this callback is invoked.
+ * 
+ * All operations are non-blocking from GPU perspective.
  */
 void processAndSubmitResultsCallback(void* userData) {
     // Safety check
@@ -46,29 +45,32 @@ void processAndSubmitResultsCallback(void* userData) {
     );
     
     try {
-        // Step 1: Read solution count from device
-        uint32_t numSolutions = 0;
-        if (cbData->d_solutionCount) {
-            cudaError_t err = cudaMemcpy(
-                &numSolutions,
-                cbData->d_solutionCount,
-                sizeof(uint32_t),
-                cudaMemcpyDeviceToHost
-            );
-            
-            if (err != cudaSuccess) {
-                std::string msg = "Failed to read solution count: ";
-                msg += cudaGetErrorString(err);
-                CallbackErrorTracker::recordError(msg);
-                return;
-            }
-        }
+        // Solutions are already in CPU memory (copied in search() before callback)
+        uint32_t numSolutions = cbData->solutions.size();
         
-        // Step 2: Log result
         if (numSolutions > 0) {
-            numSolutions = std::min(numSolutions, cbData->maxSolutions);
-            // LOG_INFO would be used here with proper logger integration
-            std::cerr << "Callback: Found " << numSolutions << " solution(s)" << std::endl;
+            LOG_DEBUG("[Callback] Submitting " + std::to_string(numSolutions) + " solution(s) to pool");
+            
+            // Submit solutions to pool if StratumClient is available
+            if (cbData->stratumClient) {
+                network::StratumClient* client = 
+                    static_cast<network::StratumClient*>(cbData->stratumClient);
+                
+                for (uint32_t i = 0; i < numSolutions; ++i) {
+                    const Solution& sol = cbData->solutions[i];
+                    
+                    // Submit to pool
+                    bool submitOk = client->submitSolution(sol);
+                    if (submitOk) {
+                        LOG_DEBUG("[Callback] Solution " + std::to_string(i+1) + "/" + 
+                                 std::to_string(numSolutions) + " submitted successfully");
+                    } else {
+                        LOG_WARN("[Callback] Failed to submit solution " + std::to_string(i+1));
+                    }
+                }
+            } else {
+                LOG_WARN("[Callback] StratumClient not set, solutions not submitted");
+            }
         }
         
     } catch (const std::exception& e) {

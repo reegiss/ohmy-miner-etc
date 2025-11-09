@@ -150,6 +150,9 @@ int main(int argc, char* argv[]) {
         // Initialize Stratum client
         network::StratumClient stratumClient(config.poolUrl, config.walletAddress);
         
+        // Phase 4.3: Register StratumClient with GPU for async result submission
+        deviceManager.setResultCallback(&stratumClient);
+        
         // Connect to pool
         if (!stratumClient.connect()) {
             LOG_ERROR("Failed to connect to pool");
@@ -298,6 +301,9 @@ int main(int argc, char* argv[]) {
             
             // Mark this job as active
             activeJobId = miningJobId;
+            
+            // Phase 4.3: Update GPU device with current job context for async callback
+            deviceManager.setMiningJobContext(miningJobId, jobSnapshot.epoch);
             
             // GPU-only full Ethash validation: kernel returns only valid shares under target
             std::vector<Solution> solutions;

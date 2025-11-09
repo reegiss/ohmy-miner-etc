@@ -62,6 +62,21 @@ public:
     );
 
     /**
+     * @brief Set callback handler for async result submission
+     * Used by Phase 4 async callback system to submit results to pool
+     * @param stratumClient Pointer to StratumClient for pool submission
+     */
+    void setResultCallback(void* stratumClient);
+
+    /**
+     * @brief Set mining job ID and epoch for callback context
+     * Called before each search() to provide job identification
+     * @param jobId Job identifier from pool
+     * @param epoch DAG epoch for mining context
+     */
+    void setMiningJobContext(const std::string& jobId, uint32_t epoch);
+
+    /**
      * @brief Get current hash rate for device
      */
     uint64_t getHashRate(int deviceId) const;

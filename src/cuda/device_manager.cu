@@ -5,6 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <vector>
+#include <string>
 #include <sstream>
 #include <iomanip>
 
@@ -99,6 +100,9 @@ public:
         totalTime_ = 0.0f;
         useTexture_ = false;
         texDAG_ = 0;
+        stratumClient_ = nullptr;
+        currentJobId_ = "";
+        currentEpoch_ = 0;
     }
 
     ~Impl() {
@@ -318,32 +322,8 @@ public:
         // Stop timing on compute stream
         CUDA_CHECK(cudaEventRecord(stopEvent_, stream_compute_));
         
-        // PHASE 4: Launch async callback for result processing
-        // This eliminates blocking cudaStreamSynchronize() and allows GPU to continue
-        // with next kernel while callback processes results asynchronously
-        
-        // Create callback data
-        auto* cbData = new ohmy::cuda::ResultCallbackData();
-        cbData->d_solutionCount = d_solutionCount_;
-        cbData->d_solutions = reinterpret_cast<void*>(d_solutions_);
-        cbData->maxSolutions = maxSolutions;
-        cbData->jobId = 0;  // TODO: pass job ID from mining engine
-        cbData->epoch = 0;  // TODO: pass epoch from DAG manager
-        
-        // Launch callback on stream_io_ (non-blocking, callback runs async)
-        CUDA_CHECK(cudaLaunchHostFunc(stream_io_, 
-                                      ohmy::cuda::processAndSubmitResultsCallback,
-                                      cbData));
-        
-        // Record results completion event on stream_io_
-        // This signals that all result transfers and processing are complete
-        CUDA_CHECK(cudaEventRecord(resultsDoneEvent_, stream_io_));
-        
-        // NOTE: We don't synchronize here anymore - callback runs asynchronously
-        // GPU can launch next kernel immediately without waiting for results
-        
-        // For now, read results synchronously (TODO: async via callback in Phase 4.3)
-        // This is temporary until full async integration is complete
+        // PHASE 4: Read results synchronously BEFORE launching callback
+        // (Callback thread cannot access CUDA device memory)
         
         // Get solution count from device
         uint32_t numSolutions = 0;
@@ -363,6 +343,7 @@ public:
             for (uint32_t i = 0; i < numSolutions; ++i) {
                 Solution sol;
                 sol.nonce = tmp[i].nonce;
+                sol.jobId = currentJobId_;  // Set job ID before passing to callback
                 std::memcpy(sol.mixHash.data(), tmp[i].mixHash, 32);
                 std::memcpy(sol.result.data(),  tmp[i].result,  32);
                 solutions.push_back(std::move(sol));
@@ -371,7 +352,25 @@ public:
             LOG_INFO("Found " + std::to_string(numSolutions) + " solution(s)!");
         }
         
-        // Calculate elapsed time (now includes callback overhead)
+        // Phase 4.3: Create callback data with already-read solutions
+        // (No CUDA memory access in callback, all data already copied to host)
+        auto* cbData = new ohmy::cuda::ResultCallbackData();
+        cbData->solutions = solutions;              // Pass host-side solutions
+        cbData->stratumClient = stratumClient_;     // StratumClient for pool submission
+        cbData->jobId = currentJobId_;              // Job ID from mining context
+        cbData->epoch = currentEpoch_;              // Epoch from mining context
+        
+        // Launch callback on stream_io_ (non-blocking, callback runs async)
+        // Callback will submit solutions to pool without accessing GPU
+        CUDA_CHECK(cudaLaunchHostFunc(stream_io_, 
+                                      ohmy::cuda::processAndSubmitResultsCallback,
+                                      cbData));
+        
+        // Record results completion event on stream_io_
+        // This signals that all result transfers and processing are complete
+        CUDA_CHECK(cudaEventRecord(resultsDoneEvent_, stream_io_));
+        
+        // Calculate elapsed time
         float milliseconds = 0;
         CUDA_CHECK(cudaEventElapsedTime(&milliseconds, startEvent_, stopEvent_));
         
@@ -393,6 +392,23 @@ public:
         uint64_t hashrate = static_cast<uint64_t>(totalHashes_ / seconds);
         
         return hashrate;
+    }
+
+    /**
+     * @brief Phase 4: Set StratumClient for async result submission
+     */
+    void setResultCallback(void* stratumClient) {
+        stratumClient_ = stratumClient;
+        LOG_DEBUG("ResultCallback: StratumClient registered");
+    }
+
+    /**
+     * @brief Phase 4: Set mining job context (jobId and epoch)
+     */
+    void setMiningJobContext(const std::string& jobId, uint32_t epoch) {
+        currentJobId_ = jobId;
+        currentEpoch_ = epoch;
+        LOG_DEBUG("ResultCallback: Job context set - jobId=" + jobId.substr(0, 8) + "..., epoch=" + std::to_string(epoch));
     }
 
 private:
@@ -493,6 +509,11 @@ private:
     
     uint64_t totalHashes_;
     float totalTime_;  // milliseconds
+    
+    // Phase 4: Callback context
+    void* stratumClient_;           // StratumClient pointer for pool submission
+    std::string currentJobId_;      // Current mining job ID
+    uint32_t currentEpoch_;         // Current mining epoch
 };
 
 // DeviceManager implementation
@@ -523,6 +544,14 @@ uint32_t DeviceManager::search(
 
 uint64_t DeviceManager::getHashRate(int deviceId) const {
     return pImpl_->getHashRate(deviceId);
+}
+
+void DeviceManager::setResultCallback(void* stratumClient) {
+    pImpl_->setResultCallback(stratumClient);
+}
+
+void DeviceManager::setMiningJobContext(const std::string& jobId, uint32_t epoch) {
+    pImpl_->setMiningJobContext(jobId, epoch);
 }
 
 } // namespace cuda

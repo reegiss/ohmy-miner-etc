@@ -4,6 +4,8 @@
 #include <vector>
 #include <functional>
 #include <memory>
+#include <string>
+#include "ohmy/types.hpp"
 
 /**
  * Phase 4: Async Result Processing with Callbacks
@@ -26,28 +28,19 @@ class DeviceManager;
  * Contains all necessary information for result processing
  */
 struct ResultCallbackData {
-    // GPU-side pointers (device memory)
-    uint32_t* d_solutionCount;       // Device pointer to solution count
-    void* d_solutions;               // Device pointer to solutions array (opaque)
+    // Host-side solution data (already copied from device!)
+    std::vector<Solution> solutions;  // CPU-side solutions ready for submission
     
-    // Parameters
-    uint32_t maxSolutions;           // Maximum solutions to read
-    
-    // CPU-side handlers
-    void* poolClient;                // Pool connection (opaque pointer)
-    void* onResultsReady;            // Optional callback (opaque)
+    // CPU-side handlers (StratumClient*)
+    void* stratumClient;              // Pool client for submitting solutions
     
     // Metadata
-    uint64_t jobId;                  // Job identifier for logging
-    uint32_t epoch;                  // DAG epoch for context
+    std::string jobId;                // Job identifier for result submission
+    uint32_t epoch;                   // DAG epoch for context
     
     ResultCallbackData()
-        : d_solutionCount(nullptr),
-          d_solutions(nullptr),
-          maxSolutions(16),
-          poolClient(nullptr),
-          onResultsReady(nullptr),
-          jobId(0),
+        : stratumClient(nullptr),
+          jobId(""),
           epoch(0)
     {}
 };
