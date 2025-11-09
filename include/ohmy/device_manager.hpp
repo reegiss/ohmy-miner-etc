@@ -94,6 +94,33 @@ public:
     );
 
     /**
+     * @brief PHASE 6: Async tick-based pipeline search using N-buffering
+     * 
+     * Non-blocking search using multi-stream async pipeline. Designed to be called
+     * repeatedly from main loop. Overlaps compute, HtoD, and DtoH operations across
+     * multiple streams to maximize GPU utilization and eliminate idle time.
+     * 
+     * Returns solutions from completed work without blocking. If current stream is
+     * still executing, returns 0 and advances to next stream for next call.
+     * 
+     * @param headerHash Block header hash for new work
+     * @param seedHash Seed hash for new work
+     * @param targetBE Difficulty target (big-endian) for new work
+     * @param startNonce Starting nonce for new work
+     * @param count Number of nonces to search in new work
+     * @param solutions Output vector for solutions from COMPLETED work
+     * @return Number of solutions found in completed work (0 if stream still running)
+     */
+    uint32_t searchAsync(
+        const hash32_t& headerHash,
+        const hash32_t& seedHash,
+        const uint8_t targetBE[32],
+        uint64_t startNonce,
+        uint64_t count,
+        std::vector<Solution>& solutions
+    );
+
+    /**
      * @brief Search for solutions on specific device (Phase 5)
      * Used in multi-GPU mode to search on one device with device-specific nonce range
      * @param deviceId Device to search on

@@ -453,13 +453,71 @@ public:
             LOG_DEBUG(ss.str());
         }
         
+        // PHASE 6: Allocate N-buffered host and device memory for async pipeline
+        const uint32_t maxSolutions = 16;
+        
+        // Allocate NUM_STREAMS copies of each buffer
+        for (int i = 0; i < NUM_STREAMS; i++) {
+            // Allocate PINNED host memory for async transfers
+            uint8_t* h_header = nullptr;
+            uint8_t* h_seedHash = nullptr;
+            uint8_t* h_target = nullptr;
+            uint32_t* h_solutionCount = nullptr;
+            DeviceSolution* h_solution = nullptr;
+            
+            CUDA_CHECK(cudaHostAlloc(&h_header, 32, cudaHostAllocDefault));
+            CUDA_CHECK(cudaHostAlloc(&h_seedHash, 32, cudaHostAllocDefault));
+            CUDA_CHECK(cudaHostAlloc(&h_target, 32, cudaHostAllocDefault));
+            CUDA_CHECK(cudaHostAlloc(&h_solutionCount, sizeof(uint32_t), cudaHostAllocDefault));
+            CUDA_CHECK(cudaHostAlloc(&h_solution, maxSolutions * sizeof(DeviceSolution), cudaHostAllocDefault));
+            
+            h_headers_.push_back(h_header);
+            h_seedHashes_.push_back(h_seedHash);
+            h_targets_.push_back(h_target);
+            h_solutionCounts_.push_back(h_solutionCount);
+            h_solutions_vec_.push_back(h_solution);
+            
+            // Allocate device memory (NUM_STREAMS copies)
+            uint8_t* d_header = nullptr;
+            uint8_t* d_seedHash = nullptr;
+            uint8_t* d_target = nullptr;
+            uint32_t* d_solutionCount = nullptr;
+            DeviceSolution* d_solution = nullptr;
+            
+            CUDA_CHECK(cudaMalloc(&d_header, 32));
+            CUDA_CHECK(cudaMalloc(&d_seedHash, 32));
+            CUDA_CHECK(cudaMalloc(&d_target, 32));
+            CUDA_CHECK(cudaMalloc(&d_solutionCount, sizeof(uint32_t)));
+            CUDA_CHECK(cudaMalloc(&d_solution, maxSolutions * sizeof(DeviceSolution)));
+            
+            d_headers_vec_.push_back(d_header);
+            d_seedHashes_vec_.push_back(d_seedHash);
+            d_targets_vec_.push_back(d_target);
+            d_solutionCounts_vec_.push_back(d_solutionCount);
+            d_solutions_vec_.push_back(d_solution);
+        }
+        
+        // Create NUM_STREAMS CUDA streams and events for N-buffering
+        for (int i = 0; i < NUM_STREAMS; i++) {
+            cudaStream_t stream = nullptr;
+            cudaEvent_t event = nullptr;
+            CUDA_CHECK(cudaStreamCreate(&stream));
+            CUDA_CHECK(cudaEventCreate(&event));
+            streams_.push_back(stream);
+            events_.push_back(event);
+        }
+        
+        LOG_INFO("PHASE 6: Initialized N-stream pipeline with " + std::to_string(NUM_STREAMS) + 
+                 " streams, " + std::to_string(NUM_STREAMS) + " pinned host buffers, and " + 
+                 std::to_string(NUM_STREAMS) + " device buffer sets");
+        
+        // Legacy single-buffer allocations (kept for backward compatibility)
         // Allocate device memory for header and seedHash
         CUDA_CHECK(cudaMalloc(&d_header_, 32));    // 32 bytes for header
         CUDA_CHECK(cudaMalloc(&d_seedHash_, 32));  // 32 bytes for seedHash
         
-    // Allocate solution buffers - now complete Solution structures (device POD)
-        const uint32_t maxSolutions = 16;
-    CUDA_CHECK(cudaMalloc(&d_solutions_, maxSolutions * sizeof(DeviceSolution)));
+        // Allocate solution buffers - now complete Solution structures (device POD)
+        CUDA_CHECK(cudaMalloc(&d_solutions_, maxSolutions * sizeof(DeviceSolution)));
         CUDA_CHECK(cudaMalloc(&d_solutionCount_, sizeof(uint32_t)));
 
         // Allocate device memory for 256-bit target (big-endian)
@@ -488,7 +546,8 @@ public:
         CUDA_CHECK(cudaEventCreate(&kernelDoneEvent_));
         CUDA_CHECK(cudaEventCreate(&resultsDoneEvent_));
         
-        LOG_INFO("Device " + std::to_string(deviceId) + " initialized successfully with 3-stream async pipeline (Phase 3)");
+        LOG_INFO("Device " + std::to_string(deviceId) + " initialized successfully with N-stream async pipeline (Phase 6) + legacy 3-stream (Phase 3)");
+        pipelineInitialized_ = true;
         return true;
     }
 
@@ -666,6 +725,167 @@ public:
         totalTime_ += milliseconds;
         
         return numSolutions;
+    }
+
+    /**
+     * @brief PHASE 6: Async tick-based pipeline search using N-buffering
+     * 
+     * This is the core of the multi-stream async pipeline. It's designed to be called
+     * repeatedly from the main loop without blocking. The function manages 3 streams
+     * (or NUM_STREAMS) in a round-robin fashion, allowing overlapping of:
+     * - Work N-1: Host->Device memory transfer (HtoD on stream i-1)
+     * - Work N: Kernel execution (on stream i)
+     * - Work N+1: Device->Host result readback (DtoH on stream i+1)
+     * 
+     * Returns: Number of solutions found and processed from the COMPLETED stream,
+     *          or 0 if the current stream is still running (non-blocking behavior)
+     */
+    uint32_t searchAsync(
+        const hash32_t& headerHash,
+        const hash32_t& seedHash,
+        const uint8_t targetBE[32],
+        uint64_t startNonce,
+        uint64_t count,
+        std::vector<Solution>& solutions
+    ) {
+        if (!pipelineInitialized_ || streams_.empty()) {
+            LOG_WARN("Pipeline not initialized, falling back to sync search()");
+            return search(headerHash, seedHash, targetBE, startNonce, count, solutions);
+        }
+
+        const uint32_t maxSolutions = 16;
+        
+        // Get current stream and event indices (round-robin)
+        int i = streamIdx_;
+        cudaStream_t stream = streams_[i];
+        cudaEvent_t event = events_[i];
+        
+        // STEP 1: Check if the PREVIOUS work on this stream is complete
+        // This is non-blocking: returns immediately if work is still running
+        cudaError_t eventStatus = cudaEventQuery(event);
+        
+        if (eventStatus == cudaErrorNotReady) {
+            // Previous work still in flight on this stream, nothing to do
+            // Advance to next stream for the next call
+            streamIdx_ = (streamIdx_ + 1) % NUM_STREAMS;
+            return 0;  // No work processed this tick
+        }
+        
+        if (eventStatus != cudaSuccess && eventStatus != cudaErrorNotReady) {
+            CUDA_CHECK(eventStatus);  // Throw on other errors
+        }
+        
+        // STEP 2: Previous work is COMPLETE, process results from this stream
+        // Copy solution count from device to host (this stream's buffer)
+        CUDA_CHECK(cudaMemcpyAsync(h_solutionCounts_[i], d_solutionCounts_vec_[i], 
+                                   sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+        
+        // Also copy solutions from device to host
+        CUDA_CHECK(cudaMemcpyAsync(h_solutions_vec_[i], d_solutions_vec_[i],
+                                   maxSolutions * sizeof(DeviceSolution), 
+                                   cudaMemcpyDeviceToHost, stream));
+        
+        // Synchronize THIS stream to ensure results are in host memory
+        // (This is necessary before CPU can read h_solutionCounts_[i] and h_solutions_vec_[i])
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        
+        // Now process the results that are available in host memory
+        uint32_t numSolutions = *h_solutionCounts_[i];
+        solutions.clear();
+        
+        if (numSolutions > 0) {
+            numSolutions = std::min(numSolutions, maxSolutions);
+            solutions.reserve(numSolutions);
+            
+            for (uint32_t j = 0; j < numSolutions; ++j) {
+                Solution sol;
+                sol.nonce = h_solutions_vec_[i][j].nonce;
+                sol.jobId = currentJobId_;
+                std::memcpy(sol.mixHash.data(), h_solutions_vec_[i][j].mixHash, 32);
+                std::memcpy(sol.result.data(),  h_solutions_vec_[i][j].result,  32);
+                solutions.push_back(std::move(sol));
+            }
+            
+            LOG_INFO("Found " + std::to_string(numSolutions) + " solution(s)!");
+        }
+        
+        // STEP 3: Prepare and launch NEW work (Work N+1) on the SAME stream
+        // This reuses the same stream, avoiding stream creation overhead
+        
+        // Copy NEW header, seedHash, target to host pinned buffer for this stream
+        std::memcpy(h_headers_[i], headerHash.data(), 32);
+        std::memcpy(h_seedHashes_[i], seedHash.data(), 32);
+        std::memcpy(h_targets_[i], targetBE, 32);
+        *h_solutionCounts_[i] = 0;  // Reset solution counter in host buffer
+        
+        // STEP 4: Async HtoD transfer of NEW data
+        CUDA_CHECK(cudaMemcpyAsync(d_headers_vec_[i], h_headers_[i], 32,
+                                   cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_seedHashes_vec_[i], h_seedHashes_[i], 32,
+                                   cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_targets_vec_[i], h_targets_[i], 32,
+                                   cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemsetAsync(d_solutionCounts_vec_[i], 0, sizeof(uint32_t), stream));
+        
+        // STEP 5: Launch kernel on this stream
+        // Determine which kernel to use
+        static int useOptimized = -1;
+        static uint32_t noncesPerThread = 1;
+        if (useOptimized == -1) {
+            const char* env = std::getenv("OHMY_USE_OPTIMIZED_KERNEL");
+            useOptimized = (env && std::string(env) == "1") ? 1 : 0;
+            
+            const char* batchEnv = std::getenv("OHMY_NONCES_PER_THREAD");
+            if (batchEnv) {
+                int batch = std::atoi(batchEnv);
+                if (batch > 0 && batch <= 256) {
+                    noncesPerThread = static_cast<uint32_t>(batch);
+                }
+            }
+        }
+        
+        if (useOptimized) {
+            launch_ethash_search_optimized(
+                reinterpret_cast<const uint64_t*>(d_dag_),
+                dagSize_,
+                reinterpret_cast<const uint32_t*>(d_headers_vec_[i]),
+                reinterpret_cast<const uint32_t*>(d_seedHashes_vec_[i]),
+                reinterpret_cast<const uint8_t*>(d_targets_vec_[i]),
+                startNonce,
+                count,
+                noncesPerThread,
+                d_solutions_vec_[i],
+                d_solutionCounts_vec_[i],
+                maxSolutions,
+                stream
+            );
+        } else {
+            launch_ethash_search(
+                reinterpret_cast<const uint64_t*>(d_dag_),
+                dagSize_,
+                reinterpret_cast<const uint32_t*>(d_headers_vec_[i]),
+                reinterpret_cast<const uint32_t*>(d_seedHashes_vec_[i]),
+                reinterpret_cast<const uint8_t*>(d_targets_vec_[i]),
+                startNonce,
+                count,
+                d_solutions_vec_[i],
+                d_solutionCounts_vec_[i],
+                maxSolutions,
+                stream
+            );
+        }
+        
+        // STEP 6: Record completion event for this work
+        // Next call to searchAsync() will check this event and process results
+        CUDA_CHECK(cudaEventRecord(event, stream));
+        
+        // STEP 7: Advance to next stream for next call (round-robin)
+        streamIdx_ = (streamIdx_ + 1) % NUM_STREAMS;
+        
+        // Update statistics
+        totalHashes_ += count;
+        
+        return numSolutions;  // Return solutions from the PREVIOUS work
     }
 
     uint64_t getHashRate(int deviceId) const {
@@ -1238,6 +1458,40 @@ private:
         jobContext_.reset();
     }
     void cleanup() {
+        // PHASE 6: Cleanup N-stream pipeline buffers
+        for (int i = 0; i < static_cast<int>(h_headers_.size()); i++) {
+            if (h_headers_[i]) cudaFreeHost(h_headers_[i]);
+            if (h_seedHashes_[i]) cudaFreeHost(h_seedHashes_[i]);
+            if (h_targets_[i]) cudaFreeHost(h_targets_[i]);
+            if (h_solutionCounts_[i]) cudaFreeHost(h_solutionCounts_[i]);
+            if (h_solutions_vec_[i]) cudaFreeHost(h_solutions_vec_[i]);
+        }
+        h_headers_.clear();
+        h_seedHashes_.clear();
+        h_targets_.clear();
+        h_solutionCounts_.clear();
+        h_solutions_vec_.clear();
+        
+        for (int i = 0; i < static_cast<int>(d_headers_vec_.size()); i++) {
+            if (d_headers_vec_[i]) cudaFree(d_headers_vec_[i]);
+            if (d_seedHashes_vec_[i]) cudaFree(d_seedHashes_vec_[i]);
+            if (d_targets_vec_[i]) cudaFree(d_targets_vec_[i]);
+            if (d_solutionCounts_vec_[i]) cudaFree(d_solutionCounts_vec_[i]);
+            if (d_solutions_vec_[i]) cudaFree(d_solutions_vec_[i]);
+        }
+        d_headers_vec_.clear();
+        d_seedHashes_vec_.clear();
+        d_targets_vec_.clear();
+        d_solutionCounts_vec_.clear();
+        d_solutions_vec_.clear();
+        
+        for (int i = 0; i < static_cast<int>(streams_.size()); i++) {
+            if (streams_[i]) cudaStreamDestroy(streams_[i]);
+            if (events_[i]) cudaEventDestroy(events_[i]);
+        }
+        streams_.clear();
+        events_.clear();
+        
         // Destroy texture object if it was created
         if (texDAG_ != 0) {
             cudaDestroyTextureObject(texDAG_);
@@ -1306,15 +1560,37 @@ private:
     void* d_dag_;
     void* d_header_;
     void* d_seedHash_;       // Seed hash from mining job
-    DeviceSolution* d_solutions_; // Device-side POD solutions
+    DeviceSolution* d_solutions_; // Device-side POD solutions (single-buffer, legacy)
     uint32_t* d_solutionCount_;
     void* d_target_;
     size_t dagSize_;
     
-    // THREE CUDA streams for overlapping compute, memory, and I/O operations
-    // stream_compute_: GPU kernel execution (compute-bound)
-    // stream_memory_: Host<->Device memory transfers (memory-bound)
-    // stream_io_: Network I/O and non-blocking operations (NEW for Phase 3)
+    // PHASE 6: N-Stream Pipeline Architecture (Multi-Buffering)
+    // NUM_STREAMS = 3: Allows overlapping of 3 independent work items
+    // Each stream has its own buffers to avoid dependencies
+    static constexpr int NUM_STREAMS = 3;
+    
+    // Duplicated host buffers for N-buffering (pinned memory for async transfers)
+    std::vector<uint8_t*> h_headers_;           // NUM_STREAMS host pinned buffers for headers
+    std::vector<uint8_t*> h_seedHashes_;        // NUM_STREAMS host pinned buffers for seedHashes
+    std::vector<uint8_t*> h_targets_;           // NUM_STREAMS host pinned buffers for targets
+    std::vector<uint32_t*> h_solutionCounts_;   // NUM_STREAMS host pinned buffers for solution counts
+    std::vector<DeviceSolution*> h_solutions_vec_;  // NUM_STREAMS host pinned buffers for solutions
+    
+    // Duplicated device buffers for N-buffering
+    std::vector<uint8_t*> d_headers_vec_;           // NUM_STREAMS device buffers for headers
+    std::vector<uint8_t*> d_seedHashes_vec_;        // NUM_STREAMS device buffers for seedHashes
+    std::vector<uint8_t*> d_targets_vec_;           // NUM_STREAMS device buffers for targets
+    std::vector<uint32_t*> d_solutionCounts_vec_;   // NUM_STREAMS device buffers for solution counts
+    std::vector<DeviceSolution*> d_solutions_vec_;  // NUM_STREAMS device buffers for solutions (POD struct)
+    
+    // Stream management for multi-buffering
+    std::vector<cudaStream_t> streams_;         // NUM_STREAMS CUDA streams
+    std::vector<cudaEvent_t> events_;           // NUM_STREAMS completion events
+    int streamIdx_ = 0;                         // Current stream index (round-robin)
+    
+    // Legacy single-buffer support (kept for backward compatibility)
+    // These are used only in legacy search() path
     cudaStream_t stream_compute_;
     cudaStream_t stream_memory_;
     cudaStream_t stream_io_;  // Phase 3: Added for true 3-stream pipeline
@@ -1334,6 +1610,11 @@ private:
     
     uint64_t totalHashes_;
     float totalTime_;  // milliseconds
+    
+    // PHASE 6: Pipeline state for async tick-based search
+    uint64_t lastStartNonce_ = 0;
+    uint64_t lastSearchCount_ = 0;
+    bool pipelineInitialized_ = false;
     
     // Phase 4: Callback context
     void* stratumClient_;           // StratumClient pointer for pool submission
@@ -1372,6 +1653,17 @@ uint32_t DeviceManager::search(
     std::vector<Solution>& solutions
 ) {
     return pImpl_->search(headerHash, seedHash, targetBE, startNonce, count, solutions);
+}
+
+uint32_t DeviceManager::searchAsync(
+    const hash32_t& headerHash,
+    const hash32_t& seedHash,
+    const uint8_t targetBE[32],
+    uint64_t startNonce,
+    uint64_t count,
+    std::vector<Solution>& solutions
+) {
+    return pImpl_->searchAsync(headerHash, seedHash, targetBE, startNonce, count, solutions);
 }
 
 uint64_t DeviceManager::getHashRate(int deviceId) const {

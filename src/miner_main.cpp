@@ -305,9 +305,11 @@ int main(int argc, char* argv[]) {
             // Phase 4.3: Update GPU device with current job context for async callback
             deviceManager.setMiningJobContext(miningJobId, jobSnapshot.epoch);
             
-            // GPU-only full Ethash validation: kernel returns only valid shares under target
+            // PHASE 6: Use async pipeline tick-based search (non-blocking, multi-stream)
+            // This replaces the sync search() with searchAsync() for better GPU utilization
+            // The function manages N streams with overlapping compute/transfer operations
             std::vector<Solution> solutions;
-            uint32_t numFound = deviceManager.search(
+            uint32_t numFound = deviceManager.searchAsync(
                 headerHash,
                 jobSnapshot.seedHash,    // Pass seedHash from job
                 currentTarget256,
@@ -447,8 +449,10 @@ int main(int argc, char* argv[]) {
                 lastStatsTime = now;
             }
             
-            // Small sleep to prevent tight loop
-            std::this_thread::sleep_for(10ms);
+            // PHASE 6: Minimal sleep (1us) - async pipeline manages back-pressure via cudaEventQuery
+            // The searchAsync() function is non-blocking and uses event queries to pace the loop
+            // CPU can spin very fast since most time is spent on GPU kernels executing in parallel
+            std::this_thread::sleep_for(1us);
         }
         
         // Cleanup
