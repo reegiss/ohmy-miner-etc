@@ -5,9 +5,15 @@
 #include <cstring>
 #include <stdexcept>
 #include <vector>
+#include <map>
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 
 namespace ohmy {
 namespace cuda {
@@ -74,6 +80,18 @@ extern "C" void launch_ethash_search_texture(
     cudaStream_t stream
 );
 
+// Phase 5.2: Shared mining job context for all GPU threads
+struct MiningJobContext {
+    std::string jobId;
+    hash32_t headerHash;
+    hash32_t seedHash;
+    std::array<uint8_t, 32> targetBE;
+    uint32_t epoch;
+    std::atomic<bool> isValid{false};
+    std::atomic<uint64_t> timestamp{0};
+    std::mutex jobMutex;
+};
+
 // Phase 5: Per-device state structure for multi-GPU support
 struct DeviceState {
     int deviceId;
@@ -108,8 +126,23 @@ struct DeviceState {
     uint32_t nonceOffset{0};
     uint32_t nonceRange{UINT32_MAX};
     
+    // Phase 5.2: Threading state
+    std::unique_ptr<std::thread> miningThread;
+    std::atomic<bool> threadRunning{false};
+    std::atomic<bool> stopRequested{false};
+    std::atomic<uint32_t> threadErrors{0};
+    
     // Cleanup method
     void cleanup() {
+        // Stop and join thread if running
+        if (miningThread) {
+            stopRequested.store(true);
+            if (miningThread->joinable()) {
+                miningThread->join();
+            }
+            miningThread.reset();
+        }
+        
         if (d_dag) cudaFree(d_dag), d_dag = nullptr;
         if (d_header) cudaFree(d_header), d_header = nullptr;
         if (d_seedHash) cudaFree(d_seedHash), d_seedHash = nullptr;
@@ -127,6 +160,190 @@ struct DeviceState {
         initialized = false;
     }
 };
+
+// Phase 5.2: Per-device mining thread function
+// Each GPU runs this function in a separate thread
+void miningThreadLoop(DeviceState* state, 
+                      std::shared_ptr<MiningJobContext> jobContext,
+                      void* stratumClient,
+                      bool* isMultiGpuMode,
+                      std::string* currentJobId,
+                      uint32_t* currentEpoch) {
+    try {
+        CUDA_CHECK(cudaSetDevice(state->deviceId));
+        
+        LOG_INFO("[Mining Thread] Started on GPU #" + std::to_string(state->deviceId));
+        state->threadRunning.store(true);
+        
+        std::shared_ptr<MiningJobContext> lastJobCtx = nullptr;
+        
+        while (!state->stopRequested.load()) {
+            try {
+                // Check for new job
+                std::shared_ptr<MiningJobContext> currentCtx;
+                {
+                    std::lock_guard<std::mutex> lock(jobContext->jobMutex);
+                    currentCtx = jobContext;
+                }
+                
+                if (!currentCtx || !currentCtx->isValid.load()) {
+                    // No valid job, wait briefly
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    continue;
+                }
+                
+                // Execute search on this GPU with device-specific nonce range
+                std::vector<Solution> solutions;
+                
+                // Use device-specific nonce offset and range
+                const uint32_t maxSolutions = 16;
+                
+                // Reset solution counter
+                uint32_t zero = 0;
+                CUDA_CHECK(cudaMemcpyAsync(state->d_solutionCount, &zero, sizeof(uint32_t),
+                                           cudaMemcpyHostToDevice, state->stream_memory));
+                
+                // Copy header, seedHash, and target to device
+                CUDA_CHECK(cudaMemcpyAsync(state->d_header, currentCtx->headerHash.data(), 32,
+                                           cudaMemcpyHostToDevice, state->stream_memory));
+                CUDA_CHECK(cudaMemcpyAsync(state->d_seedHash, currentCtx->seedHash.data(), 32,
+                                           cudaMemcpyHostToDevice, state->stream_memory));
+                CUDA_CHECK(cudaMemcpyAsync(state->d_target, currentCtx->targetBE.data(), 32,
+                                           cudaMemcpyHostToDevice, state->stream_memory));
+                
+                // Record memory sync event
+                CUDA_CHECK(cudaEventRecord(state->memoryDoneEvent, state->stream_memory));
+                CUDA_CHECK(cudaStreamWaitEvent(state->stream_compute, state->memoryDoneEvent));
+                
+                // Start timing
+                CUDA_CHECK(cudaEventRecord(state->startEvent, state->stream_compute));
+                
+                // Get kernel settings
+                static int useOptimized = -1;
+                static uint32_t noncesPerThread = 1;
+                if (useOptimized == -1) {
+                    const char* env = std::getenv("OHMY_USE_OPTIMIZED_KERNEL");
+                    useOptimized = (env && std::string(env) == "1") ? 1 : 0;
+                    
+                    const char* batchEnv = std::getenv("OHMY_NONCES_PER_THREAD");
+                    if (batchEnv) {
+                        int batch = std::atoi(batchEnv);
+                        if (batch > 0 && batch <= 256) {
+                            noncesPerThread = static_cast<uint32_t>(batch);
+                        }
+                    }
+                }
+                
+                // Launch kernel with device-specific nonce range
+                if (useOptimized) {
+                    launch_ethash_search_optimized(
+                        reinterpret_cast<const uint64_t*>(state->d_dag),
+                        state->dagSize,
+                        reinterpret_cast<const uint32_t*>(state->d_header),
+                        reinterpret_cast<const uint32_t*>(state->d_seedHash),
+                        reinterpret_cast<const uint8_t*>(state->d_target),
+                        state->nonceOffset,
+                        state->nonceRange,
+                        noncesPerThread,
+                        state->d_solutions,
+                        state->d_solutionCount,
+                        maxSolutions,
+                        state->stream_compute
+                    );
+                } else {
+                    launch_ethash_search(
+                        reinterpret_cast<const uint64_t*>(state->d_dag),
+                        state->dagSize,
+                        reinterpret_cast<const uint32_t*>(state->d_header),
+                        reinterpret_cast<const uint32_t*>(state->d_seedHash),
+                        reinterpret_cast<const uint8_t*>(state->d_target),
+                        state->nonceOffset,
+                        state->nonceRange,
+                        state->d_solutions,
+                        state->d_solutionCount,
+                        maxSolutions,
+                        state->stream_compute
+                    );
+                }
+                
+                // Record kernel completion
+                CUDA_CHECK(cudaEventRecord(state->kernelDoneEvent, state->stream_compute));
+                CUDA_CHECK(cudaStreamWaitEvent(state->stream_io, state->kernelDoneEvent));
+                CUDA_CHECK(cudaEventRecord(state->stopEvent, state->stream_compute));
+                
+                // Read solutions from device
+                uint32_t numSolutions = 0;
+                CUDA_CHECK(cudaMemcpy(&numSolutions, state->d_solutionCount, sizeof(uint32_t),
+                                      cudaMemcpyDeviceToHost));
+                
+                if (numSolutions > 0) {
+                    numSolutions = std::min(numSolutions, maxSolutions);
+                    
+                    std::vector<DeviceSolution> tmp(numSolutions);
+                    CUDA_CHECK(cudaMemcpy(tmp.data(), state->d_solutions,
+                                         numSolutions * sizeof(DeviceSolution), cudaMemcpyDeviceToHost));
+                    solutions.clear();
+                    solutions.reserve(numSolutions);
+                    for (uint32_t i = 0; i < numSolutions; ++i) {
+                        Solution sol;
+                        sol.nonce = tmp[i].nonce;
+                        sol.jobId = currentCtx->jobId;
+                        std::memcpy(sol.mixHash.data(), tmp[i].mixHash, 32);
+                        std::memcpy(sol.result.data(), tmp[i].result, 32);
+                        solutions.push_back(std::move(sol));
+                    }
+                    
+                    LOG_INFO("[Mining Thread] GPU #" + std::to_string(state->deviceId) + 
+                             " found " + std::to_string(numSolutions) + " solution(s)!");
+                }
+                
+                // Create callback data with per-device info
+                auto* cbData = new ohmy::cuda::ResultCallbackData();
+                cbData->solutions = solutions;
+                cbData->stratumClient = stratumClient;
+                cbData->jobId = currentCtx->jobId;
+                cbData->epoch = currentCtx->epoch;
+                // Phase 5: Per-device tracking
+                cbData->deviceId = state->deviceId;
+                cbData->deviceHashesThisRound = state->nonceRange;
+                
+                // Compute timing for this round
+                float roundMilliseconds = 0;
+                CUDA_CHECK(cudaEventElapsedTime(&roundMilliseconds, state->startEvent, state->stopEvent));
+                cbData->deviceTimeMilliseconds = roundMilliseconds;
+                
+                // Launch callback
+                CUDA_CHECK(cudaLaunchHostFunc(state->stream_io,
+                                              ohmy::cuda::processAndSubmitResultsCallback,
+                                              cbData));
+                
+                // Record completion
+                CUDA_CHECK(cudaEventRecord(state->resultsDoneEvent, state->stream_io));
+                
+                // Update statistics
+                float milliseconds = 0;
+                CUDA_CHECK(cudaEventElapsedTime(&milliseconds, state->startEvent, state->stopEvent));
+                state->totalHashes += state->nonceRange;
+                state->totalTime += milliseconds;
+                
+            } catch (const std::exception& e) {
+                state->threadErrors++;
+                LOG_ERROR("[Mining Thread] GPU #" + std::to_string(state->deviceId) + 
+                         " error: " + e.what());
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        
+        state->threadRunning.store(false);
+        LOG_INFO("[Mining Thread] Stopped on GPU #" + std::to_string(state->deviceId));
+        
+    } catch (const std::exception& e) {
+        state->threadRunning.store(false);
+        state->threadErrors++;
+        LOG_ERROR("[Mining Thread] GPU #" + std::to_string(state->deviceId) + 
+                 " fatal error: " + e.what());
+    }
+}
 
 class DeviceManager::Impl {
 public:
@@ -316,7 +533,6 @@ public:
         
         // Check for optimized kernel flag (env var OHMY_USE_OPTIMIZED_KERNEL=1)
         static int useOptimized = -1;
-        static int useTexture = -1;
         static uint32_t noncesPerThread = 1;  // Default: 1 nonce/thread (OPTIMAL: +2.7% vs prev default, empirically tuned)
         if (useOptimized == -1) {
             const char* env = std::getenv("OHMY_USE_OPTIMIZED_KERNEL");
@@ -422,6 +638,14 @@ public:
         cbData->stratumClient = stratumClient_;     // StratumClient for pool submission
         cbData->jobId = currentJobId_;              // Job ID from mining context
         cbData->epoch = currentEpoch_;              // Epoch from mining context
+        // Phase 5: Single-GPU compatibility (device 0)
+        cbData->deviceId = 0;                       // Device 0 for single-GPU mode
+        cbData->deviceHashesThisRound = count;      // Use count parameter for hashes
+        
+        // Compute timing for this round
+        float roundMilliseconds = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&roundMilliseconds, startEvent_, stopEvent_));
+        cbData->deviceTimeMilliseconds = roundMilliseconds;
         
         // Launch callback on stream_io_ (non-blocking, callback runs async)
         // Callback will submit solutions to pool without accessing GPU
@@ -490,7 +714,6 @@ public:
         
         isMultiGpuMode_ = true;
         deviceStates_.clear();
-        deviceStates_.resize(deviceCount);
         
         int successCount = 0;
         for (int i = 0; i < deviceCount; ++i) {
@@ -517,59 +740,64 @@ public:
         LOG_INFO("Initializing device " + std::to_string(deviceId) + " (part of " + 
                  std::to_string(devicesTotal) + " GPU setup)");
         
-        DeviceState& state = deviceStates_[deviceId];
-        state.deviceId = deviceId;
-        state.dagSize = dagSize;
+        // Create device state via map
+        auto state = std::make_unique<DeviceState>();
+        state->deviceId = deviceId;
+        state->dagSize = dagSize;
         
         try {
             // Allocate GPU memory for DAG
-            CUDA_CHECK(cudaMalloc(&state.d_dag, dagSize));
+            CUDA_CHECK(cudaMalloc(&state->d_dag, dagSize));
             
             // Copy DAG to GPU
             LOG_INFO("Copying DAG to GPU " + std::to_string(deviceId) + " (" + 
                      std::to_string(dagSize / (1024*1024)) + " MB)");
-            CUDA_CHECK(cudaMemcpy(state.d_dag, dag, dagSize, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(state->d_dag, dag, dagSize, cudaMemcpyHostToDevice));
             
             // Allocate device memory for headers and hashes
-            CUDA_CHECK(cudaMalloc(&state.d_header, 32));
-            CUDA_CHECK(cudaMalloc(&state.d_seedHash, 32));
+            CUDA_CHECK(cudaMalloc(&state->d_header, 32));
+            CUDA_CHECK(cudaMalloc(&state->d_seedHash, 32));
             
             // Allocate solution buffers
             const uint32_t maxSolutions = 16;
-            CUDA_CHECK(cudaMalloc(&state.d_solutions, maxSolutions * sizeof(DeviceSolution)));
-            CUDA_CHECK(cudaMalloc(&state.d_solutionCount, sizeof(uint32_t)));
+            CUDA_CHECK(cudaMalloc(&state->d_solutions, maxSolutions * sizeof(DeviceSolution)));
+            CUDA_CHECK(cudaMalloc(&state->d_solutionCount, sizeof(uint32_t)));
             
             // Allocate device memory for target
-            CUDA_CHECK(cudaMalloc(&state.d_target, 32));
+            CUDA_CHECK(cudaMalloc(&state->d_target, 32));
             
             // Create THREE CUDA streams per device for 3-stream pipeline
-            CUDA_CHECK(cudaStreamCreate(&state.stream_compute));
-            CUDA_CHECK(cudaStreamCreate(&state.stream_memory));
-            CUDA_CHECK(cudaStreamCreate(&state.stream_io));
+            CUDA_CHECK(cudaStreamCreate(&state->stream_compute));
+            CUDA_CHECK(cudaStreamCreate(&state->stream_memory));
+            CUDA_CHECK(cudaStreamCreate(&state->stream_io));
             
             // Create events for synchronization
-            CUDA_CHECK(cudaEventCreate(&state.startEvent));
-            CUDA_CHECK(cudaEventCreate(&state.stopEvent));
-            CUDA_CHECK(cudaEventCreate(&state.memoryDoneEvent));
-            CUDA_CHECK(cudaEventCreate(&state.kernelDoneEvent));
-            CUDA_CHECK(cudaEventCreate(&state.resultsDoneEvent));
+            CUDA_CHECK(cudaEventCreate(&state->startEvent));
+            CUDA_CHECK(cudaEventCreate(&state->stopEvent));
+            CUDA_CHECK(cudaEventCreate(&state->memoryDoneEvent));
+            CUDA_CHECK(cudaEventCreate(&state->kernelDoneEvent));
+            CUDA_CHECK(cudaEventCreate(&state->resultsDoneEvent));
             
             // Calculate nonce range for this device (partition nonce space)
             // Each device gets (2^32 / devicesTotal) nonces
             uint64_t rangeSize = (1ULL << 32) / devicesTotal;
-            state.nonceOffset = static_cast<uint32_t>(deviceId * rangeSize);
-            state.nonceRange = static_cast<uint32_t>(rangeSize);
+            state->nonceOffset = static_cast<uint32_t>(deviceId * rangeSize);
+            state->nonceRange = static_cast<uint32_t>(rangeSize);
             
-            state.initialized = true;
+            state->initialized = true;
+            
+            // Insert into map
+            deviceStates_[deviceId] = std::move(state);
             
             LOG_INFO("Device " + std::to_string(deviceId) + " initialized successfully");
-            LOG_INFO("  Nonce range: [0x" + std::to_string(state.nonceOffset) + 
-                     ", 0x" + std::to_string(state.nonceOffset + state.nonceRange) + ")");
+            LOG_INFO("  Nonce range: [0x" + std::to_string(deviceStates_[deviceId]->nonceOffset) + 
+                     ", 0x" + std::to_string(deviceStates_[deviceId]->nonceOffset + 
+                     deviceStates_[deviceId]->nonceRange) + ")");
             
             return true;
         } catch (const std::exception& e) {
             LOG_ERROR("Exception during device initialization: " + std::string(e.what()));
-            state.cleanup();
+            state->cleanup();
             return false;
         }
     }
@@ -580,8 +808,8 @@ public:
     int getDeviceCount() const {
         if (isMultiGpuMode_) {
             int count = 0;
-            for (const auto& state : deviceStates_) {
-                if (state.initialized) count++;
+            for (const auto& entry : deviceStates_) {
+                if (entry.second && entry.second->initialized) count++;
             }
             return count;
         }
@@ -592,10 +820,11 @@ public:
      * @brief Phase 5: Check if device is initialized
      */
     bool isDeviceInitialized(int deviceId) const {
-        if (!isMultiGpuMode_ || deviceId < 0 || deviceId >= static_cast<int>(deviceStates_.size())) {
+        if (!isMultiGpuMode_) {
             return false;
         }
-        return deviceStates_[deviceId].initialized;
+        auto it = deviceStates_.find(deviceId);
+        return it != deviceStates_.end() && it->second && it->second->initialized;
     }
 
     /**
@@ -632,10 +861,10 @@ public:
     uint64_t getTotalHashRate() const {
         uint64_t total = 0;
         if (isMultiGpuMode_) {
-            for (const auto& state : deviceStates_) {
-                if (state.initialized && state.totalTime > 0.0f) {
-                    float seconds = state.totalTime / 1000.0f;
-                    total += static_cast<uint64_t>(state.totalHashes / seconds);
+            for (const auto& entry : deviceStates_) {
+                if (entry.second && entry.second->initialized && entry.second->totalTime > 0.0f) {
+                    float seconds = entry.second->totalTime / 1000.0f;
+                    total += static_cast<uint64_t>(entry.second->totalHashes / seconds);
                 }
             }
         } else {
@@ -650,10 +879,10 @@ public:
     std::vector<uint64_t> getAllHashRates() const {
         std::vector<uint64_t> rates;
         if (isMultiGpuMode_) {
-            for (const auto& state : deviceStates_) {
-                if (state.initialized && state.totalTime > 0.0f) {
-                    float seconds = state.totalTime / 1000.0f;
-                    rates.push_back(static_cast<uint64_t>(state.totalHashes / seconds));
+            for (const auto& entry : deviceStates_) {
+                if (entry.second && entry.second->initialized && entry.second->totalTime > 0.0f) {
+                    float seconds = entry.second->totalTime / 1000.0f;
+                    rates.push_back(static_cast<uint64_t>(entry.second->totalHashes / seconds));
                 } else {
                     rates.push_back(0);
                 }
@@ -662,6 +891,75 @@ public:
             rates.push_back(getHashRate(0));  // Fallback
         }
         return rates;
+    }
+
+    /**
+     * @brief Phase 5: Get per-device statistics
+     */
+    std::vector<std::string> getDeviceStatistics(int deviceId = -1) const {
+        std::vector<std::string> stats;
+        
+        if (deviceId >= 0) {
+            // Get stats for specific device
+            auto it = deviceStates_.find(deviceId);
+            if (it != deviceStates_.end() && it->second && it->second->initialized) {
+                // Build statistics string for this device
+                auto* state = it->second.get();
+                float seconds = state->totalTime > 0.0f ? state->totalTime / 1000.0f : 0.0f;
+                double hashrate = seconds > 0.0 ? (double)state->totalHashes / seconds / 1e6 : 0.0;
+                
+                std::ostringstream oss;
+                oss << "GPU#" << deviceId << ": "
+                    << "Hashes=" << state->totalHashes << " "
+                    << "Time=" << state->totalTime << "ms "
+                    << "Rate=" << std::fixed << std::setprecision(2) << hashrate << " MH/s";
+                stats.push_back(oss.str());
+            }
+        } else {
+            // Get stats for all devices
+            for (const auto& entry : deviceStates_) {
+                if (entry.second && entry.second->initialized) {
+                    auto* state = entry.second.get();
+                    float seconds = state->totalTime > 0.0f ? state->totalTime / 1000.0f : 0.0f;
+                    double hashrate = seconds > 0.0 ? (double)state->totalHashes / seconds / 1e6 : 0.0;
+                    
+                    std::ostringstream oss;
+                    oss << "GPU#" << entry.first << ": "
+                        << "Hashes=" << state->totalHashes << " "
+                        << "Time=" << state->totalTime << "ms "
+                        << "Rate=" << std::fixed << std::setprecision(2) << hashrate << " MH/s";
+                    stats.push_back(oss.str());
+                }
+            }
+        }
+        
+        return stats;
+    }
+
+    /**
+     * @brief Phase 5: Get aggregate statistics across all devices
+     */
+    std::string getAggregateStatistics() const {
+        uint64_t totalHashes = 0;
+        float totalTime = 0.0f;
+        
+        for (const auto& entry : deviceStates_) {
+            if (entry.second && entry.second->initialized) {
+                totalHashes += entry.second->totalHashes;
+                totalTime = std::max(totalTime, entry.second->totalTime);  // Take max time
+            }
+        }
+        
+        float seconds = totalTime > 0.0f ? totalTime / 1000.0f : 0.0f;
+        double hashrate = seconds > 0.0 ? (double)totalHashes / seconds / 1e6 : 0.0;
+        
+        std::ostringstream oss;
+        oss << "Aggregate: "
+            << "TotalHashes=" << totalHashes << " "
+            << "MaxTime=" << totalTime << "ms "
+            << "Rate=" << std::fixed << std::setprecision(2) << hashrate << " MH/s";
+        
+        return oss.str();
     }
 
     /**
@@ -678,8 +976,12 @@ public:
             return 0;
         }
         
-        DeviceState& state = deviceStates_[deviceId];
-        if (!state.initialized) {
+        auto it = deviceStates_.find(deviceId);
+        if (it == deviceStates_.end() || !it->second) {
+            return 0;
+        }
+        DeviceState* state = it->second.get();
+        if (!state->initialized) {
             return 0;
         }
         
@@ -689,23 +991,23 @@ public:
         
         // Reset solution counter
         uint32_t zero = 0;
-        CUDA_CHECK(cudaMemcpyAsync(state.d_solutionCount, &zero, sizeof(uint32_t),
-                                   cudaMemcpyHostToDevice, state.stream_memory));
+        CUDA_CHECK(cudaMemcpyAsync(state->d_solutionCount, &zero, sizeof(uint32_t),
+                                   cudaMemcpyHostToDevice, state->stream_memory));
         
         // Copy header, seedHash, and target to device
-        CUDA_CHECK(cudaMemcpyAsync(state.d_header, headerHash.data(), 32,
-                                   cudaMemcpyHostToDevice, state.stream_memory));
-        CUDA_CHECK(cudaMemcpyAsync(state.d_seedHash, seedHash.data(), 32,
-                                   cudaMemcpyHostToDevice, state.stream_memory));
-        CUDA_CHECK(cudaMemcpyAsync(state.d_target, targetBE, 32,
-                                   cudaMemcpyHostToDevice, state.stream_memory));
+        CUDA_CHECK(cudaMemcpyAsync(state->d_header, headerHash.data(), 32,
+                                   cudaMemcpyHostToDevice, state->stream_memory));
+        CUDA_CHECK(cudaMemcpyAsync(state->d_seedHash, seedHash.data(), 32,
+                                   cudaMemcpyHostToDevice, state->stream_memory));
+        CUDA_CHECK(cudaMemcpyAsync(state->d_target, targetBE, 32,
+                                   cudaMemcpyHostToDevice, state->stream_memory));
         
         // Record memory sync event
-        CUDA_CHECK(cudaEventRecord(state.memoryDoneEvent, state.stream_memory));
-        CUDA_CHECK(cudaStreamWaitEvent(state.stream_compute, state.memoryDoneEvent));
+        CUDA_CHECK(cudaEventRecord(state->memoryDoneEvent, state->stream_memory));
+        CUDA_CHECK(cudaStreamWaitEvent(state->stream_compute, state->memoryDoneEvent));
         
         // Start timing
-        CUDA_CHECK(cudaEventRecord(state.startEvent, state.stream_compute));
+        CUDA_CHECK(cudaEventRecord(state->startEvent, state->stream_compute));
         
         // Get kernel settings
         static int useOptimized = -1;
@@ -727,50 +1029,50 @@ public:
         // Use device's nonce offset as starting point, range as search count
         if (useOptimized) {
             launch_ethash_search_optimized(
-                reinterpret_cast<const uint64_t*>(state.d_dag),
-                state.dagSize,
-                reinterpret_cast<const uint32_t*>(state.d_header),
-                reinterpret_cast<const uint32_t*>(state.d_seedHash),
-                reinterpret_cast<const uint8_t*>(state.d_target),
-                state.nonceOffset,  // Device-specific nonce offset
-                state.nonceRange,   // Device-specific range
+                reinterpret_cast<const uint64_t*>(state->d_dag),
+                state->dagSize,
+                reinterpret_cast<const uint32_t*>(state->d_header),
+                reinterpret_cast<const uint32_t*>(state->d_seedHash),
+                reinterpret_cast<const uint8_t*>(state->d_target),
+                state->nonceOffset,  // Device-specific nonce offset
+                state->nonceRange,   // Device-specific range
                 noncesPerThread,
-                state.d_solutions,
-                state.d_solutionCount,
+                state->d_solutions,
+                state->d_solutionCount,
                 maxSolutions,
-                state.stream_compute
+                state->stream_compute
             );
         } else {
             launch_ethash_search(
-                reinterpret_cast<const uint64_t*>(state.d_dag),
-                state.dagSize,
-                reinterpret_cast<const uint32_t*>(state.d_header),
-                reinterpret_cast<const uint32_t*>(state.d_seedHash),
-                reinterpret_cast<const uint8_t*>(state.d_target),
-                state.nonceOffset,  // Device-specific nonce offset
-                state.nonceRange,   // Device-specific range
-                state.d_solutions,
-                state.d_solutionCount,
+                reinterpret_cast<const uint64_t*>(state->d_dag),
+                state->dagSize,
+                reinterpret_cast<const uint32_t*>(state->d_header),
+                reinterpret_cast<const uint32_t*>(state->d_seedHash),
+                reinterpret_cast<const uint8_t*>(state->d_target),
+                state->nonceOffset,  // Device-specific nonce offset
+                state->nonceRange,   // Device-specific range
+                state->d_solutions,
+                state->d_solutionCount,
                 maxSolutions,
-                state.stream_compute
+                state->stream_compute
             );
         }
         
         // Record kernel completion
-        CUDA_CHECK(cudaEventRecord(state.kernelDoneEvent, state.stream_compute));
-        CUDA_CHECK(cudaStreamWaitEvent(state.stream_io, state.kernelDoneEvent));
-        CUDA_CHECK(cudaEventRecord(state.stopEvent, state.stream_compute));
+        CUDA_CHECK(cudaEventRecord(state->kernelDoneEvent, state->stream_compute));
+        CUDA_CHECK(cudaStreamWaitEvent(state->stream_io, state->kernelDoneEvent));
+        CUDA_CHECK(cudaEventRecord(state->stopEvent, state->stream_compute));
         
         // Read solutions from device
         uint32_t numSolutions = 0;
-        CUDA_CHECK(cudaMemcpy(&numSolutions, state.d_solutionCount, sizeof(uint32_t),
+        CUDA_CHECK(cudaMemcpy(&numSolutions, state->d_solutionCount, sizeof(uint32_t),
                               cudaMemcpyDeviceToHost));
         
         if (numSolutions > 0) {
             numSolutions = std::min(numSolutions, maxSolutions);
             
             std::vector<DeviceSolution> tmp(numSolutions);
-            CUDA_CHECK(cudaMemcpy(tmp.data(), state.d_solutions,
+            CUDA_CHECK(cudaMemcpy(tmp.data(), state->d_solutions,
                                  numSolutions * sizeof(DeviceSolution), cudaMemcpyDeviceToHost));
             solutions.clear();
             solutions.reserve(numSolutions);
@@ -793,26 +1095,37 @@ public:
         cbData->stratumClient = stratumClient_;
         cbData->jobId = currentJobId_;
         cbData->epoch = currentEpoch_;
+        // Phase 5: Per-device tracking
+        cbData->deviceId = deviceId;
+        cbData->deviceHashesThisRound = state->nonceRange;
+        
+        // Compute timing for this round
+        float roundMilliseconds = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&roundMilliseconds, state->startEvent, state->stopEvent));
+        cbData->deviceTimeMilliseconds = roundMilliseconds;
         
         // Launch callback
-        CUDA_CHECK(cudaLaunchHostFunc(state.stream_io,
+        CUDA_CHECK(cudaLaunchHostFunc(state->stream_io,
                                       ohmy::cuda::processAndSubmitResultsCallback,
                                       cbData));
         
         // Record completion
-        CUDA_CHECK(cudaEventRecord(state.resultsDoneEvent, state.stream_io));
+        CUDA_CHECK(cudaEventRecord(state->resultsDoneEvent, state->stream_io));
         
         // Update statistics
         float milliseconds = 0;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, state.startEvent, state.stopEvent));
-        state.totalHashes += state.nonceRange;
-        state.totalTime += milliseconds;
+        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, state->startEvent, state->stopEvent));
+        state->totalHashes += state->nonceRange;
+        state->totalTime += milliseconds;
         
         return numSolutions;
     }
 
     /**
      * @brief Phase 5: Start mining on all devices (placeholder for threading)
+     */
+    /**
+     * @brief Phase 5.2: Start mining on all devices
      */
     void startMiningAllDevices(
         const hash32_t& headerHash,
@@ -828,33 +1141,101 @@ public:
         LOG_INFO("Starting mining on all devices for " + 
                 (durationSeconds > 0 ? std::to_string(durationSeconds) + " seconds" : "indefinite duration"));
         
+        // Create shared job context
+        jobContext_ = std::make_shared<MiningJobContext>();
+        jobContext_->jobId = std::string(headerHash.data(), headerHash.data() + 32);
+        jobContext_->headerHash = headerHash;
+        jobContext_->seedHash = seedHash;
+        std::copy(targetBE, targetBE + 32, jobContext_->targetBE.begin());
+        jobContext_->epoch = currentEpoch_;
+        jobContext_->isValid.store(true);
+        jobContext_->timestamp.store(
+            std::chrono::system_clock::now().time_since_epoch().count());
+        
         miningRunning_ = true;
         
-        // TODO: Phase 5.2 - Implement per-device mining threads here
-        // For now, just log that we're ready
+        // Spawn mining thread for each device
+        int threadCount = 0;
+        for (auto& entry : deviceStates_) {
+            auto& state = entry.second;
+            if (!state || !state->initialized) continue;
+            
+            // Reset stop flag and clear thread if it exists
+            state->stopRequested.store(false);
+            state->threadErrors.store(0);
+            if (state->miningThread && state->miningThread->joinable()) {
+                state->miningThread->join();
+            }
+            
+            // Spawn new mining thread for this device
+            state->miningThread = std::make_unique<std::thread>(
+                miningThreadLoop,
+                state.get(),
+                jobContext_,
+                stratumClient_,
+                &isMultiGpuMode_,
+                &currentJobId_,
+                &currentEpoch_
+            );
+            
+            threadCount++;
+            LOG_INFO("Spawned mining thread for GPU #" + std::to_string(state->deviceId));
+        }
+        
+        LOG_INFO("Total mining threads spawned: " + std::to_string(threadCount));
     }
 
     /**
-     * @brief Phase 5: Stop all mining threads
+     * @brief Phase 5.2: Stop all mining threads
      */
     void stopAllMining() {
         LOG_INFO("Stopping all mining threads");
-        miningRunning_ = false;
         
-        // TODO: Phase 5.2 - Join all mining threads
+        if (!isMultiGpuMode_) {
+            return;
+        }
+        
+        // Signal all threads to stop
+        for (auto& entry : deviceStates_) {
+            auto& state = entry.second;
+            if (!state || !state->initialized) continue;
+            state->stopRequested.store(true);
+        }
+        
+        // Wait for all threads to finish
+        int stoppedCount = 0;
+        for (auto& entry : deviceStates_) {
+            auto& state = entry.second;
+            if (!state || !state->initialized) continue;
+            
+            if (state->miningThread && state->miningThread->joinable()) {
+                LOG_INFO("Waiting for mining thread on GPU #" + std::to_string(state->deviceId) + 
+                         " to stop...");
+                state->miningThread->join();
+                stoppedCount++;
+            }
+        }
+        
+        LOG_INFO("All mining threads stopped (" + std::to_string(stoppedCount) + " threads)");
+        miningRunning_ = false;
     }
 
 private:
     // Cleanup all multi-GPU device states
     void cleanupMultiGpu() {
-        for (auto& state : deviceStates_) {
-            if (state.initialized) {
-                CUDA_CHECK(cudaSetDevice(state.deviceId));
-                state.cleanup();
+        // Stop all mining threads first
+        stopAllMining();
+        
+        for (auto& entry : deviceStates_) {
+            auto& state = entry.second;
+            if (state && state->initialized) {
+                CUDA_CHECK(cudaSetDevice(state->deviceId));
+                state->cleanup();
             }
         }
         deviceStates_.clear();
         isMultiGpuMode_ = false;
+        jobContext_.reset();
     }
     void cleanup() {
         // Destroy texture object if it was created
@@ -960,10 +1341,11 @@ private:
     uint32_t currentEpoch_;         // Current mining epoch
     
     // Phase 5: Multi-GPU state
-    std::vector<DeviceState> deviceStates_;  // Per-device state management
+    std::map<int, std::unique_ptr<DeviceState>> deviceStates_;  // Per-device state via map
     int totalDeviceCount_;                   // Total available GPUs in system
     bool isMultiGpuMode_;                    // Flag for multi-GPU vs single-GPU mode
     bool miningRunning_;                     // Flag for active mining threads
+    std::shared_ptr<MiningJobContext> jobContext_;  // Phase 5.2: Shared job context for all threads
 };
 
 // DeviceManager implementation
@@ -1055,6 +1437,14 @@ uint64_t DeviceManager::getTotalHashRate() const {
 
 std::vector<uint64_t> DeviceManager::getAllHashRates() const {
     return pImpl_->getAllHashRates();
+}
+
+std::vector<std::string> DeviceManager::getDeviceStatistics(int deviceId) const {
+    return pImpl_->getDeviceStatistics(deviceId);
+}
+
+std::string DeviceManager::getAggregateStatistics() const {
+    return pImpl_->getAggregateStatistics();
 }
 
 } // namespace cuda

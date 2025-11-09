@@ -161,6 +161,20 @@ public:
      */
     uint64_t getHashRate(int deviceId) const;
 
+    /**
+     * @brief Get per-device statistics (Phase 5)
+     * Returns formatted statistics for each initialized device
+     * @param deviceId Device to get stats for (-1 = all devices)
+     * @return Vector of statistics strings
+     */
+    std::vector<std::string> getDeviceStatistics(int deviceId = -1) const;
+
+    /**
+     * @brief Get aggregate statistics across all devices (Phase 5)
+     * @return Formatted string with overall mining statistics
+     */
+    std::string getAggregateStatistics() const;
+
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl_;

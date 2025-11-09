@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cinttypes>  // for PRIx64
 #include <cmath>       // for std::round
+#include <mutex>       // Phase 5: Thread-safe multi-GPU solution submission
 
 using json = nlohmann::json;
 
@@ -232,6 +233,8 @@ public:
     }
 
     bool submitSolution(const Solution& solution) {
+        std::lock_guard<std::mutex> lock(ioMutex_);  // Phase 5: Protect multi-GPU concurrent submissions
+        
         if (!connected_) return false;
         
         // Format nonce as 16-char hex string (no 0x prefix)
@@ -589,6 +592,10 @@ private:
     OnJobCallback onJob_;
     OnDifficultyCallback onDifficulty_;
     std::string currentWorker_;
+    
+    // Phase 5: Thread-safety for multi-GPU solution submission
+    // Protects socket I/O and internal state from concurrent access
+    mutable std::mutex ioMutex_;
 };
 
 // StratumClient implementation

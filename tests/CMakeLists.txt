@@ -30,14 +30,33 @@ add_executable(test_hex_utils
     ${PROJECT_SOURCE_DIR}/src/utils/hex_utils.cpp
 )
 
+# Phase 5: Multi-GPU unit tests
+add_executable(test_multi_gpu
+    test_multi_gpu.cpp
+    ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
+    ${PROJECT_SOURCE_DIR}/src/utils/hex_utils.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/ethash.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/keccak.cpp
+    ${PROJECT_SOURCE_DIR}/src/network/stratum_client.cpp
+    ${PROJECT_SOURCE_DIR}/src/network/connection.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/device_manager.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/result_callback.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel_warp.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/kernels/keccak_constants.cu
+)
+
 target_link_libraries(test_ethash PRIVATE Threads::Threads)
 target_link_libraries(test_dag PRIVATE Threads::Threads ${CUDA_LIBRARIES})
 target_link_libraries(test_stratum PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(test_hex_utils PRIVATE Threads::Threads)
+target_link_libraries(test_multi_gpu PRIVATE ${CUDA_LIBRARIES} Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 
 target_include_directories(test_ethash PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(test_dag PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(test_stratum PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(test_hex_utils PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(test_multi_gpu PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # Benchmark tests - compile separately
 add_executable(bench_ethash
@@ -73,5 +92,6 @@ add_test(NAME TestEthash COMMAND test_ethash)
 add_test(NAME TestDAG COMMAND test_dag)
 add_test(NAME TestStratum COMMAND test_stratum)
 add_test(NAME TestHexUtils COMMAND test_hex_utils)
+add_test(NAME TestMultiGPU COMMAND test_multi_gpu)
 add_test(NAME BenchEthash COMMAND bench_ethash)
 add_test(NAME BenchCUDA COMMAND bench_cuda)

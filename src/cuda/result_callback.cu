@@ -62,12 +62,20 @@ void processAndSubmitResultsCallback(void* userData) {
         std::string jobIdShort = cbData->jobId.length() > 8 ? 
                                 cbData->jobId.substr(0, 8) : cbData->jobId;
         
-        LOG_DEBUG("[ResultCallback] Invoked: job=" + jobIdShort + "..., " +
+        // Phase 5: Include device ID in logging
+        std::string devicePrefix = (cbData->deviceId >= 0) ?
+                                  ("[GPU#" + std::to_string(cbData->deviceId) + "] ") :
+                                  "";
+        
+        LOG_DEBUG("[ResultCallback] " + devicePrefix + 
+                 "Invoked: job=" + jobIdShort + "..., " +
                  "epoch=" + std::to_string(cbData->epoch) + ", " +
-                 "solutions=" + std::to_string(numSolutions));
+                 "solutions=" + std::to_string(numSolutions) +
+                 ", hashes=" + std::to_string(cbData->deviceHashesThisRound) +
+                 ", time=" + std::to_string(cbData->deviceTimeMilliseconds) + "ms");
         
         if (numSolutions == 0) {
-            LOG_DEBUG("[ResultCallback] No solutions to submit");
+            LOG_DEBUG("[ResultCallback] " + devicePrefix + "No solutions to submit");
             return;
         }
         

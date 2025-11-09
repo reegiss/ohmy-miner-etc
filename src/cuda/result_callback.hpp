@@ -5,6 +5,10 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <mutex>
+#include <atomic>
+#include <iomanip>
+#include <sstream>
 #include "ohmy/types.hpp"
 
 /**
@@ -38,10 +42,18 @@ struct ResultCallbackData {
     std::string jobId;                // Job identifier for result submission
     uint32_t epoch;                   // DAG epoch for context
     
+    // Phase 5: Per-device tracking (multi-GPU support)
+    int deviceId;                     // GPU device ID that generated this callback
+    uint64_t deviceHashesThisRound;   // Hashes computed on this GPU for this round
+    float deviceTimeMilliseconds;     // Time spent on this GPU for this round
+    
     ResultCallbackData()
         : stratumClient(nullptr),
           jobId(""),
-          epoch(0)
+          epoch(0),
+          deviceId(-1),
+          deviceHashesThisRound(0),
+          deviceTimeMilliseconds(0.0f)
     {}
 };
 
@@ -73,6 +85,89 @@ struct CallbackErrorTracker {
     static void recordError(const std::string& error);
     static std::string getLastError();
     static void clearError();
+};
+
+/**
+ * Phase 5: Per-device statistics tracking for multi-GPU mining
+ * 
+ * Tracks performance metrics for each GPU independently:
+ * - Total hashes computed
+ * - Total time spent mining
+ * - Solutions found
+ * - Callback invocations
+ * - Error count
+ */
+struct DeviceStats {
+    int deviceId;                      // GPU device ID
+    uint64_t totalHashes;              // Total hashes computed on this GPU
+    uint64_t totalTime_ms;             // Total time spent (milliseconds)
+    uint64_t solutionsFound;           // Number of valid solutions found
+    uint64_t callbackInvocations;      // Number of times callback was called
+    uint64_t errorCount;               // Number of errors on this GPU
+    std::string lastErrorMessage;      // Last error message
+    std::atomic<bool> initialized;     // Whether stats are initialized
+    mutable std::mutex statsMutex;     // Thread-safe access (mutable for const methods)
+    
+    DeviceStats(int id = -1)
+        : deviceId(id),
+          totalHashes(0),
+          totalTime_ms(0),
+          solutionsFound(0),
+          callbackInvocations(0),
+          errorCount(0),
+          lastErrorMessage(""),
+          initialized(false)
+    {}
+    
+    /**
+     * Update statistics with callback data
+     */
+    void updateFromCallback(const ResultCallbackData& cbData) {
+        std::lock_guard<std::mutex> lock(statsMutex);
+        totalHashes += cbData.deviceHashesThisRound;
+        totalTime_ms += static_cast<uint64_t>(cbData.deviceTimeMilliseconds);
+        solutionsFound += cbData.solutions.size();
+        callbackInvocations++;
+    }
+    
+    /**
+     * Record an error for this device
+     */
+    void recordError(const std::string& errorMsg) {
+        std::lock_guard<std::mutex> lock(statsMutex);
+        errorCount++;
+        lastErrorMessage = errorMsg;
+    }
+    
+    /**
+     * Get hashrate in MH/s
+     */
+    double getHashrate_MHs() const {
+        std::lock_guard<std::mutex> lock(statsMutex);
+        if (totalTime_ms == 0) return 0.0;
+        // Convert: hashes / milliseconds * 1000 / 1,000,000 = MH/s
+        return (double)totalHashes / (double)totalTime_ms / 1000.0;
+    }
+    
+    /**
+     * Get aggregated statistics as string
+     */
+    std::string toString() const {
+        std::lock_guard<std::mutex> lock(statsMutex);
+        std::ostringstream oss;
+        oss << "GPU#" << deviceId << ": "
+            << "Hashes=" << totalHashes
+            << ", Time=" << totalTime_ms << "ms"
+            << ", Solutions=" << solutionsFound
+            << ", Callbacks=" << callbackInvocations
+            << ", Errors=" << errorCount
+            << ", Rate=" << std::fixed << std::setprecision(2)
+            << getHashrate_MHs() << "MH/s";
+        if (!lastErrorMessage.empty()) {
+            oss << ", LastError=" << lastErrorMessage;
+        }
+        return oss.str();
+    }
 };
 
 }  // namespace ohmy::cuda
