@@ -236,12 +236,14 @@ public:
         // Check for optimized kernel flag (env var OHMY_USE_OPTIMIZED_KERNEL=1)
         static int useOptimized = -1;
         static int useTexture = -1;
-        static uint32_t noncesPerThread = 4;  // Default: 4 nonces/thread (best balance: +17%)
+        static uint32_t noncesPerThread = 1;  // Default: 1 nonce/thread (OPTIMAL: +2.7% vs prev default, empirically tuned)
         if (useOptimized == -1) {
             const char* env = std::getenv("OHMY_USE_OPTIMIZED_KERNEL");
             useOptimized = (env && std::string(env) == "1") ? 1 : 0;
             
             // Allow custom noncesPerThread via env var for experimentation
+            // Empirical results show degradation with larger values:
+            // NONCES=1 (8.02 MH/s) > 2 (7.99) > 3 (7.91) > 4 (7.81) > 8 (7.61) > 16+ (degraded)
             const char* batchEnv = std::getenv("OHMY_NONCES_PER_THREAD");
             if (batchEnv) {
                 int batch = std::atoi(batchEnv);

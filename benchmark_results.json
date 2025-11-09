@@ -1,0 +1,60 @@
+{
+  "timestamp": "2025-11-09 14:15:33",
+  "configuration": {
+    "duration_per_test": 30,
+    "runs_per_value": 3,
+    "values_tested": [
+      8,
+      16,
+      32,
+      64,
+      128,
+      256
+    ]
+  },
+  "results": [
+    {
+      "nonces_per_thread": 8,
+      "hashrates": [],
+      "avg_hashrate": null,
+      "compile_time": null,
+      "error": "run_cmd() got an unexpected keyword argument 'cwd'"
+    },
+    {
+      "nonces_per_thread": 16,
+      "hashrates": [],
+      "avg_hashrate": null,
+      "compile_time": null,
+      "error": "run_cmd() got an unexpected keyword argument 'cwd'"
+    },
+    {
+      "nonces_per_thread": 32,
+      "hashrates": [],
+      "avg_hashrate": null,
+      "compile_time": null,
+      "error": "run_cmd() got an unexpected keyword argument 'cwd'"
+    },
+    {
+      "nonces_per_thread": 64,
+      "hashrates": [],
+      "avg_hashrate": null,
+      "compile_time": null,
+      "error": "run_cmd() got an unexpected keyword argument 'cwd'"
+    },
+    {
+      "nonces_per_thread": 128,
+      "hashrates": [],
+      "avg_hashrate": null,
+      "compile_time": null,
+      "error": "run_cmd() got an unexpected keyword argument 'cwd'"
+    },
+    {
+      "nonces_per_thread": 256,
+      "hashrates": [],
+      "avg_hashrate": null,
+      "compile_time": null,
+      "error": "run_cmd() got an unexpected keyword argument 'cwd'"
+    }
+  ],
+  "analysis": {}
+}
