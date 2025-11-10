@@ -129,6 +129,30 @@ public:
     );
 
     /**
+     * @brief Synchronous search for accurate hashrate measurement
+     * 
+     * Blocking search implementation that waits for kernel completion before returning.
+     * This ensures accurate timing measurements and prevents hashrate inflation from
+     * overlapping operations.
+     * 
+     * @param headerHash Block header hash
+     * @param seedHash Seed hash for verification
+     * @param targetBE Difficulty target (big-endian)
+     * @param startNonce Starting nonce value
+     * @param count Number of nonces to search
+     * @param solutions Output vector for found solutions
+     * @return Number of solutions found
+     */
+    uint32_t searchSync(
+        const hash32_t& headerHash,
+        const hash32_t& seedHash,
+        const uint8_t targetBE[32],
+        uint64_t startNonce,
+        uint64_t count,
+        std::vector<Solution>& solutions
+    );
+
+    /**
      * @brief Search for solutions on specific device (Phase 5)
      * Used in multi-GPU mode to search on one device with device-specific nonce range
      * @param deviceId Device to search on

@@ -267,7 +267,7 @@ void MiningEngine::run(std::atomic<bool>& runFlag) {
 
         // Mining batch parameters
         uint64_t startNonce = 0; // TODO: Replace with actual nonce logic
-        uint64_t searchRange = 1000000; // TODO: Replace with dynamic batch size logic
+        uint64_t searchRange = 10000000; // 10M nonces per batch for GTX 1660 SUPER
 
         // Mine a batch using async search
         std::vector<Solution> solutions;
@@ -287,8 +287,7 @@ void MiningEngine::run(std::atomic<bool>& runFlag) {
             processSolutions(solutions, jobId);
         }
 
-        // Increment hashes for this batch
-        totalHashes_ += searchRange;
+        // Note: totalHashes_ is already incremented in deviceManager_->search()
 
         // Print stats every 30 seconds
         if (now - lastStatsTime > 30s) {
@@ -343,11 +342,18 @@ MiningStats MiningEngine::getStatistics() const {
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - startTime_).count();
     
     MiningStats stats;
-    stats.totalHashes = totalHashes_;
+    // Get total hashes and hashrate from device manager
+    if (deviceManager_) {
+        uint64_t deviceHashrate = deviceManager_->getHashRate(config_.deviceId);
+        stats.totalHashes = deviceHashrate * elapsed;  // Approximate total hashes in MH/s * seconds
+        stats.hashRate = deviceHashrate * 1000000;     // Convert MH/s to H/s for compatibility
+    } else {
+        stats.totalHashes = 0;
+        stats.hashRate = 0;
+    }
     stats.acceptedShares = acceptedShares_;
     stats.rejectedShares = rejectedShares_;
     stats.uptime = static_cast<double>(elapsed);
-    stats.hashRate = (elapsed > 0) ? (totalHashes_ / elapsed) : 0;
     
     return stats;
 }

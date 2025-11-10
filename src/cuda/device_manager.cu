@@ -244,8 +244,136 @@ public:
         uint64_t count,
         std::vector<Solution>& solutions
     ) {
-        // Delegate to async pipeline (legacy sync path removed)
-        return searchAsync(headerHash, seedHash, targetBE, startNonce, count, solutions);
+        // Use synchronous search for accurate hashrate measurement
+        return searchSync(headerHash, seedHash, targetBE, startNonce, count, solutions);
+    }
+
+    /**
+     * @brief Synchronous search implementation for accurate hashrate measurement
+     * 
+     * This function performs a blocking search operation, waiting for kernel completion
+     * before returning. This ensures accurate timing and hashrate calculations.
+     */
+    uint32_t searchSync(
+        const hash32_t& headerHash,
+        const hash32_t& seedHash,
+        const uint8_t targetBE[32],
+        uint64_t startNonce,
+        uint64_t count,
+        std::vector<Solution>& solutions
+    ) {
+        if (!pipelineInitialized_) {
+            LOG_ERROR("Pipeline not initialized - cannot perform sync search");
+            return 0;
+        }
+
+        // Use the default compute stream for synchronous operation
+        cudaStream_t stream = stream_compute_;
+        if (!stream) {
+            LOG_ERROR("Compute stream not available for sync search");
+            return 0;
+        }
+
+        // Allocate device memory for this search
+        uint32_t* d_header = nullptr;
+        uint32_t* d_seedHash = nullptr;
+        uint8_t* d_targetBE = nullptr;
+        DeviceSolution* d_solutions = nullptr;
+        uint32_t* d_solutionCount = nullptr;
+
+        const uint32_t maxSolutions = 16;
+        size_t headerSize = 8 * sizeof(uint32_t);  // 32 bytes
+        size_t seedHashSize = 8 * sizeof(uint32_t); // 32 bytes
+        size_t targetSize = 32 * sizeof(uint8_t);   // 32 bytes
+        size_t solutionsSize = maxSolutions * sizeof(DeviceSolution);
+        size_t countSize = sizeof(uint32_t);
+
+        CUDA_CHECK(cudaMalloc(&d_header, headerSize));
+        CUDA_CHECK(cudaMalloc(&d_seedHash, seedHashSize));
+        CUDA_CHECK(cudaMalloc(&d_targetBE, targetSize));
+        CUDA_CHECK(cudaMalloc(&d_solutions, solutionsSize));
+        CUDA_CHECK(cudaMalloc(&d_solutionCount, countSize));
+
+        // Copy input data to device
+        CUDA_CHECK(cudaMemcpyAsync(d_header, headerHash.data(), headerSize, cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_seedHash, seedHash.data(), seedHashSize, cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_targetBE, targetBE, targetSize, cudaMemcpyHostToDevice, stream));
+
+        // Reset solution counter
+        uint32_t zero = 0;
+        CUDA_CHECK(cudaMemcpyAsync(d_solutionCount, &zero, countSize, cudaMemcpyHostToDevice, stream));
+
+        // Launch kernel
+        KernelLaunchParams klp{};
+        klp.d_dag = reinterpret_cast<const uint64_t*>(d_dag_);
+        klp.dagSize = dagSize_;
+        klp.d_header = d_header;
+        klp.d_seedHash = d_seedHash;
+        klp.d_targetBE = d_targetBE;
+        klp.startNonce = startNonce;
+        klp.searchCount = count;
+        klp.d_solutions = d_solutions;
+        klp.d_solutionCount = d_solutionCount;
+        klp.maxSolutions = maxSolutions;
+        klp.stream = stream;
+        klp.variant = KernelVariant::Auto;
+
+        // Start timing
+        cudaEvent_t startEvent, stopEvent;
+        CUDA_CHECK(cudaEventCreate(&startEvent));
+        CUDA_CHECK(cudaEventCreate(&stopEvent));
+        CUDA_CHECK(cudaEventRecord(startEvent, stream));
+
+        launch_search_kernel(klp);
+
+        // Record stop time
+        CUDA_CHECK(cudaEventRecord(stopEvent, stream));
+
+        // Wait for completion
+        CUDA_CHECK(cudaEventSynchronize(stopEvent));
+
+        // Calculate elapsed time
+        float milliseconds = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, startEvent, stopEvent));
+
+        // Update timing statistics
+        totalTime_ += milliseconds;
+        totalHashes_ += count;
+
+        // Read results
+        uint32_t numSolutions = 0;
+        CUDA_CHECK(cudaMemcpy(&numSolutions, d_solutionCount, countSize, cudaMemcpyDeviceToHost));
+
+        if (numSolutions > 0) {
+            numSolutions = std::min(numSolutions, maxSolutions);
+            
+            std::vector<DeviceSolution> tmp(numSolutions);
+            CUDA_CHECK(cudaMemcpy(tmp.data(), d_solutions, numSolutions * sizeof(DeviceSolution), cudaMemcpyDeviceToHost));
+            
+            solutions.clear();
+            solutions.reserve(numSolutions);
+            for (uint32_t i = 0; i < numSolutions; ++i) {
+                Solution sol;
+                sol.nonce = tmp[i].nonce;
+                sol.jobId = currentJobId_;
+                std::memcpy(sol.mixHash.data(), tmp[i].mixHash, 32);
+                std::memcpy(sol.result.data(), tmp[i].result, 32);
+                solutions.push_back(std::move(sol));
+            }
+
+            LOG_INFO("Found " + std::to_string(numSolutions) + " solution(s) in sync search!");
+        }
+
+        // Cleanup
+        CUDA_CHECK(cudaFree(d_header));
+        CUDA_CHECK(cudaFree(d_seedHash));
+        CUDA_CHECK(cudaFree(d_targetBE));
+        CUDA_CHECK(cudaFree(d_solutions));
+        CUDA_CHECK(cudaFree(d_solutionCount));
+        CUDA_CHECK(cudaEventDestroy(startEvent));
+        CUDA_CHECK(cudaEventDestroy(stopEvent));
+
+        return numSolutions;
     }
 
     /**
@@ -531,9 +659,6 @@ public:
     }
 
     /**
-     * @brief Phase 5: Start mining on all devices (placeholder for threading)
-     */
-    /**
      * @brief Phase 5.2: Start mining on all devices
      */
     void startMiningAllDevices(
@@ -790,6 +915,17 @@ uint32_t DeviceManager::searchAsync(
     std::vector<Solution>& solutions
 ) {
     return pImpl_->searchAsync(headerHash, seedHash, targetBE, startNonce, count, solutions);
+}
+
+uint32_t DeviceManager::searchSync(
+    const hash32_t& headerHash,
+    const hash32_t& seedHash,
+    const uint8_t targetBE[32],
+    uint64_t startNonce,
+    uint64_t count,
+    std::vector<Solution>& solutions
+) {
+    return pImpl_->searchSync(headerHash, seedHash, targetBE, startNonce, count, solutions);
 }
 
 uint64_t DeviceManager::getHashRate(int deviceId) const {
