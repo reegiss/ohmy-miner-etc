@@ -189,7 +189,6 @@ void generateDagGpu(
     uint32_t numDagItems        // Number of DAG items to generate
 ) {
     const int threadsPerBlock = 256;
-    const int numBlocks = (numDagItems + threadsPerBlock - 1) / threadsPerBlock;
     
     // Process in batches to avoid long kernel execution
     const uint32_t batchSize = 1024 * 1024; // 1M items per batch

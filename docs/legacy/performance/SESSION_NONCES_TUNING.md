@@ -240,4 +240,3 @@ Systematic empirical tuning identified **NONCES_PER_THREAD=1** as the optimal pa
 | Pool Mining Status | Active & Stable ✅ |
 | Production Ready | YES ✅ |
 | Commit | 1706c40 |
-

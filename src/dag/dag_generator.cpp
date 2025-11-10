@@ -9,14 +9,27 @@
 #include <vector>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <cuda_runtime.h>
+
+// Define CUDA_CHECK macro if not already defined
+#ifndef CUDA_CHECK
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            LOG_ERROR("CUDA error: " + std::string(cudaGetErrorString(err))); \
+            throw std::runtime_error("CUDA error"); \
+        } \
+    } while(0)
+#endif
 
 namespace ohmy {
 namespace dag {
 
 class DagGenerator::Impl {
 public:
-    Impl() : currentEpoch_(0), dagData_(nullptr), dagSize_(0) {}
+    Impl() : currentEpoch_(0), dagData_(nullptr), dagSize_(0), d_dag_(nullptr) {}
 
     ~Impl() {
         cleanup();
@@ -29,12 +42,9 @@ public:
 
         LOG_INFO("Generating DAG for epoch " + std::to_string(epoch) + "...");
 
-        // Try to load from cache first
-        if (loadFromCache(epoch)) {
-            LOG_INFO("✓ DAG loaded from cache");
-            currentEpoch_ = epoch;
-            return dagData_;
-        }
+        // GPU-FIRST: No disk cache - DAG is GPU-resident only
+        // Fast regeneration with GPU means disk I/O is slower than just regenerating
+        // This also avoids 4GB RAM spike from loading cached DAG
 
         // Calculate sizes
         uint32_t cacheSize = Ethash::getCacheSize(epoch);
@@ -91,8 +101,8 @@ public:
             cudaError_t err = cudaMalloc(&d_cache, cacheBytes);
             if (err != cudaSuccess) {
                 LOG_ERROR("  Failed to allocate GPU cache memory: " + std::string(cudaGetErrorString(err)));
-                LOG_WARN("  Falling back to CPU generation");
-                useGpu = false;
+                LOG_ERROR("  GPU is REQUIRED for mining (no CPU fallback)");
+                return nullptr;
             }
             
             if (useGpu) {
@@ -105,9 +115,9 @@ public:
                 err = cudaMalloc(&d_dag, dagSize_);
                 if (err != cudaSuccess) {
                     LOG_ERROR("  Failed to allocate GPU DAG memory: " + std::string(cudaGetErrorString(err)));
+                    LOG_ERROR("  GPU memory exhausted - need at least " + std::to_string(dagSize_ / (1024*1024)) + " MB free VRAM");
                     cudaFree(d_cache);
-                    LOG_WARN("  Falling back to CPU generation");
-                    useGpu = false;
+                    return nullptr;
                 }
 
                 CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
@@ -121,8 +131,7 @@ public:
                     LOG_ERROR("  Failed to copy cache to GPU: " + std::string(cudaGetErrorString(err)));
                     cudaFree(d_cache);
                     cudaFree(d_dag);
-                    LOG_WARN("  Falling back to CPU generation");
-                    useGpu = false;
+                    return nullptr;
                 } else {
                     LOG_INFO("  ✓ Cache copied to GPU (" + std::to_string(cacheBytes / (1024*1024)) + " MB)");
                 }
@@ -150,97 +159,51 @@ public:
                     
                     LOG_INFO("  ✓ DAG generated on GPU");
                     
-                    // Copy DAG back to CPU
-                    LOG_INFO("  Copying DAG from GPU to CPU...");
-                    err = cudaMemcpy(dagData_, d_dag, dagSize_, cudaMemcpyDeviceToHost);
-                    if (err != cudaSuccess) {
-                        LOG_ERROR("  Failed to copy DAG from GPU: " + std::string(cudaGetErrorString(err)));
-                        cudaFree(d_cache);
-                        cudaFree(d_dag);
-                        LOG_WARN("  Falling back to CPU generation");
-                        useGpu = false;
-                    } else {
-                        LOG_INFO("  ✓ DAG copied to CPU");
+                    // GPU-FIRST: Keep DAG in GPU memory only
+                    // No CPU copy - DAG stays resident in VRAM for mining
+                    LOG_INFO("  DAG remains in GPU memory (zero-copy architecture)");
+                    
+                    // Free host buffer immediately - we don't need 4GB in RAM
+                    if (dagData_) {
+                        std::free(dagData_);
+                        LOG_INFO("  ✓ Freed " + std::to_string(dagSize_ / (1024*1024)) + " MB from host RAM");
                     }
                     
-                    // Cleanup GPU memory
+                    // Allocate minimal placeholder (API compatibility)
+                    dagData_ = std::malloc(128);
+                    if (dagData_) {
+                        std::memset(dagData_, 0x42, 128);  // GPU-resident marker
+                    }
+                    
+                    // Cleanup GPU cache only (DAG stays allocated for mining)
                     cudaFree(d_cache);
-                    cudaFree(d_dag);
+                    
+                    // Store GPU pointer for zero-copy access
+                    d_dag_ = d_dag;
+                    
+                    // IMPORTANT: d_dag is NOT freed - it stays in GPU memory
                 } catch (const std::exception& e) {
                     LOG_ERROR("  Exception during GPU generation: " + std::string(e.what()));
                     cudaFree(d_cache);
                     cudaFree(d_dag);
-                    LOG_WARN("  Falling back to CPU generation");
-                    useGpu = false;
+                    return nullptr;
                 }
             }
-        }
-        
-        // CPU generation with multi-threading (fallback or if GPU disabled)
-        if (!useGpu) {
-            const uint32_t numThreads = std::thread::hardware_concurrency();
-            LOG_INFO("  Using CPU with " + std::to_string(numThreads) + " thread(s)");
-        
-            std::vector<std::thread> threads;
-            const uint32_t itemsPerThread = numItems / numThreads;
-            const uint32_t reportInterval = numItems / 20; // Report every 5%
-            
-            std::atomic<uint32_t> progress{0};
-            std::atomic<uint32_t> lastReported{0};
-            
-            // Capture cache by reference (read-only, thread-safe)
-            const auto& cacheRef = cache;
-            
-            for (uint32_t t = 0; t < numThreads; t++) {
-                uint32_t start = t * itemsPerThread;
-                uint32_t end = (t == numThreads - 1) ? numItems : (t + 1) * itemsPerThread;
-                
-                threads.emplace_back([&cacheRef, dag, start, end, &progress, &lastReported, reportInterval, numItems]() {
-                    try {
-                        for (uint32_t i = start; i < end; i++) {
-                            dag[i] = Ethash::calculateDatasetItem(cacheRef, i);
-                            
-                            // Update progress
-                            uint32_t current = progress.fetch_add(1, std::memory_order_relaxed) + 1;
-                            
-                            // Report progress periodically
-                            if (reportInterval > 0 && current % reportInterval == 0) {
-                                uint32_t percent = (current * 100) / numItems;
-                                LOG_INFO("    Progress: " + std::to_string(percent) + "%");
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        LOG_ERROR("Exception in DAG generation thread: " + std::string(e.what()));
-                    } catch (...) {
-                        LOG_ERROR("Unknown exception in DAG generation thread");
-                    }
-                });
-            }
-            
-            // Wait for all threads to complete
-            LOG_INFO("  Waiting for threads to complete...");
-            for (auto& thread : threads) {
-                thread.join();
-            }
-            LOG_INFO("  All threads completed");
+        } else {
+            // GPU is REQUIRED - no CPU fallback
+            LOG_ERROR("  GPU mining is REQUIRED (CPU fallback disabled by design)");
+            return nullptr;
         }
         
         auto endTime = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime);
         
-        LOG_INFO("  ✓ DAG generated in " + std::to_string(duration.count()) + "s");
+        LOG_INFO("  ✓ DAG generated in " + std::to_string(duration.count()) + "s (GPU-only, zero CPU usage)");
 
         currentEpoch_ = epoch;
         
-        // Save to cache
-        if (!cacheDir_.empty()) {
-            LOG_INFO("  Saving DAG to cache...");
-            if (saveToCache(epoch)) {
-                LOG_INFO("  ✓ DAG saved to cache");
-            } else {
-                LOG_WARN("  Failed to save DAG to cache");
-            }
-        }
+        // Note: No disk cache - DAG is GPU-resident only (zero-copy, minimal RAM)
+        // Regeneration on restart is fast with GPU acceleration
         
         return dagData_;
     }
@@ -253,8 +216,22 @@ public:
         return dagSize_;
     }
 
+    void* getGpuPointer() const {
+        return d_dag_;
+    }
+
     uint32_t getCurrentEpoch() const {
         return currentEpoch_;
+    }
+
+    void freeHostMemory() {
+        if (dagData_) {
+            size_t freedMB = dagSize_ / (1024 * 1024);
+            std::free(dagData_);
+            dagData_ = nullptr;
+            // Keep dagSize_ for API compatibility
+            LOG_INFO("✓ Freed " + std::to_string(freedMB) + " MB of DAG from host RAM");
+        }
     }
 
     void setCacheDir(const std::string& path) {
@@ -343,11 +320,16 @@ private:
             std::free(dagData_);
             dagData_ = nullptr;
         }
+        if (d_dag_ != nullptr) {
+            cudaFree(d_dag_);
+            d_dag_ = nullptr;
+        }
         dagSize_ = 0;
     }
 
     uint32_t currentEpoch_;
-    void* dagData_;
+    void* dagData_;        // Host placeholder (128 bytes)
+    void* d_dag_;          // GPU DAG pointer
     size_t dagSize_;
     std::string cacheDir_;
 };
@@ -371,6 +353,10 @@ size_t DagGenerator::getSize() const {
     return pImpl_->getSize();
 }
 
+void* DagGenerator::getGpuPointer() const {
+    return pImpl_->getGpuPointer();
+}
+
 uint32_t DagGenerator::getCurrentEpoch() const {
     return pImpl_->getCurrentEpoch();
 }
@@ -385,6 +371,10 @@ bool DagGenerator::loadFromCache(uint32_t epoch) {
 
 bool DagGenerator::saveToCache(uint32_t epoch) {
     return pImpl_->saveToCache(epoch);
+}
+
+void DagGenerator::freeHostMemory() {
+    pImpl_->freeHostMemory();
 }
 
 } // namespace dag

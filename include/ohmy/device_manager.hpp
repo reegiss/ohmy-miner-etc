@@ -51,6 +51,14 @@ public:
     bool initDevice(int deviceId, const void* dag, size_t dagSize);
 
     /**
+     * @brief Initialize specific device with GPU-resident DAG (zero-copy)
+     * @param deviceId The CUDA device ID to initialize
+     * @param d_dag GPU pointer to DAG data (already in VRAM)
+     * @param dagSize Size of DAG in bytes
+     */
+    bool initDeviceZeroCopy(int deviceId, void* d_dag, size_t dagSize);
+
+    /**
      * @brief Initialize specific device with device offset for nonce distribution (Phase 5)
      * @param deviceId The CUDA device ID to initialize
      * @param devicesTotal Total number of devices for nonce range calculation

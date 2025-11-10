@@ -1,4 +1,8 @@
-# OhMy Miner ETC - Documentation Index
+# OhMy Miner ETC - Documentation Hub
+
+Central access point for architecture, optimization reports, protocol references, and session histories.
+
+For a categorized list of every markdown document, see [INDEX.md](./INDEX.md).
 
 ## Essential Documentation
 
@@ -107,4 +111,4 @@ Investigation of CUDA texture memory for DAG access:
 
 ---
 
-Last updated: 2025-11-08
+Last updated: 2025-11-09

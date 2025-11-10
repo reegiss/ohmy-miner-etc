@@ -9,13 +9,21 @@ set(SOURCES
     utils/logger.cpp
     utils/hex_utils.cpp
     utils/difficulty.cpp
+    cuda/core/device_state.cpp
+    cuda/kernels/kernel_launcher.cpp
+    cuda/pipeline/search_executor.cpp
 )
 
 # CUDA source files
 set(CUDA_SOURCES
     cuda/device_manager.cu
+    cuda/threading/mining_thread.cu
+    cuda/stats/device_stats.cpp
+    cuda/pipeline/pipeline_manager.cpp
+    cuda/utils/memory_profiler.cpp
     cuda/result_callback.cu
     cuda/dag_kernel.cu
+    cuda/modules/device_initializer.cu
     cuda/kernels/ethash_kernel.cu
     cuda/kernels/search_kernel.cu
     cuda/kernels/search_kernel_warp.cu
@@ -47,4 +55,5 @@ set_target_properties(ohmy-miner-etc PROPERTIES
 target_include_directories(ohmy-miner-etc
     PRIVATE
     ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src/cuda
 )

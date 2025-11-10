@@ -3,13 +3,8 @@
 #include <cstring>
 #include "ohmy/types.hpp"
 #include "keccak_dev.cuh"
-
-// Device-compatible solution structure (same as search_kernel.cu)
-struct DeviceSolution {
-    uint64_t nonce;
-    uint8_t mixHash[32];
-    uint8_t result[32];
-};
+#include "ohmy/cuda/core/device_solution.hpp"
+using ohmy::cuda::DeviceSolution;
 
 namespace ohmy {
 namespace cuda {
@@ -48,20 +43,22 @@ __global__ void ethash_search_kernel_warp(
     
     // Shared memory for warp cooperation
     // - header: 8 uint32 (shared by all threads)
-    // - seedHash: 8 uint32 (shared by all threads)
+    // - seedHash: 8 uint32 (shared by all threads, unused but kept for consistency)
     // - mix: 32 uint32 (one per thread, but we need all for DAG lookup)
     // - dagAccess: temp space for DAG data
     __shared__ uint32_t s_header[8];
-    __shared__ uint32_t s_seedHash[8];
+    // Removed unused seedHash shared buffer to reduce shared memory footprint.
+    // __shared__ uint32_t s_seedHash[8];
     __shared__ uint32_t s_mix[32];        // Shared mix state
     __shared__ uint64_t s_dagBuffer[16];  // Shared DAG buffer (128 bytes)
     
     // All threads load header cooperatively
     if (laneId < 8) {
         s_header[laneId] = headerHash[laneId];
-        s_seedHash[laneId] = seedHash[laneId];
     }
     __syncwarp();
+    
+    // Seed hash intentionally unused in warp kernel; header alone incorporated into seed.
     
     // ===== STEP 1: Keccak512(header || nonce) to get seed =====
     uint8_t keccak_input[40];
@@ -105,17 +102,13 @@ __global__ void ethash_search_kernel_warp(
     __syncwarp();
     
     // ===== STEP 3: DAG mixing (64 rounds) =====
-    const uint32_t MIX_WORDS = 32;
+    // Note: MIX_WORDS currently unused in this implementation
     const uint32_t NUM_ACCESSES = 64;
     const uint64_t dagItems = dagSize / 64;  // Number of 64-byte items
     
     for (uint32_t round = 0; round < NUM_ACCESSES; ++round) {
         // Calculate parent index using FNV (all threads need it)
-        // FNV requires reading mix[], so use shared memory
-        uint32_t mixIdx = round % 16;
-        
         // Each thread computes part of FNV (distributed computation)
-        // For now: just use laneId to index into mix for FNV input
         uint32_t fnv_input = ((uint32_t*)s_mix)[laneId];
         uint32_t t = fnv1a(seed[0] ^ round, fnv_input);
         

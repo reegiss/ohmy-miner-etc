@@ -38,6 +38,12 @@ public:
     size_t getSize() const;
 
     /**
+     * @brief Get GPU pointer to DAG (for zero-copy architecture)
+     * @return Device pointer to DAG in GPU memory, or nullptr if not generated
+     */
+    void* getGpuPointer() const;
+
+    /**
      * @brief Get current epoch
      */
     uint32_t getCurrentEpoch() const;
@@ -56,6 +62,12 @@ public:
      * @brief Save DAG to cache file
      */
     bool saveToCache(uint32_t epoch);
+
+    /**
+     * @brief Free host memory after DAG is copied to GPU
+     * Call this after initDevice to reduce RAM usage
+     */
+    void freeHostMemory();
 
 private:
     class Impl;

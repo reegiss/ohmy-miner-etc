@@ -22,7 +22,10 @@ __global__ void ethash_hash_kernel(
     uint32_t* solutions,         // Output buffer for solutions
     uint32_t* solutionCount      // Number of solutions found
 ) {
-    uint64_t nonce = startNonce + blockIdx.x * blockDim.x + threadIdx.x;
+    // Placeholder kernel body until full Ethash implemented.
+    // Suppress unused parameter warnings to keep build clean.
+    (void)header; (void)dag; (void)dagSize; (void)startNonce;
+    (void)target; (void)solutions; (void)solutionCount;
     
     // TODO: Implement Ethash algorithm
     // 1. Combine header + nonce
@@ -46,6 +49,7 @@ __global__ void generate_dag_kernel(
     uint64_t startItem           // Starting item index
 ) {
     uint64_t item = startItem + blockIdx.x * blockDim.x + threadIdx.x;
+    (void)cacheSize; // Parameters not used yet; suppress warnings.
     
     if (item >= dagSize) return;
     

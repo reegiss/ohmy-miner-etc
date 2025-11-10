@@ -4,13 +4,8 @@
 #include <cstdio>
 #include "ohmy/types.hpp"
 #include "keccak_dev.cuh"
-
-// Device-compatible solution structure
-struct DeviceSolution {
-    uint64_t nonce;
-    uint8_t mixHash[32];
-    uint8_t result[32];
-};
+#include "ohmy/cuda/core/device_solution.hpp"
+using ohmy::cuda::DeviceSolution;
 
 namespace ohmy {
 namespace cuda {
@@ -45,7 +40,7 @@ __global__ void ethash_search_kernel(
     
     // Shared memory for header + seedHash
     __shared__ uint32_t s_header[8];
-    __shared__ uint32_t s_seedHash[8];
+    __shared__ uint32_t s_seedHash[8]; // used for final keccak step
     if (threadIdx.x < 8) {
         s_header[threadIdx.x]   = headerHash[threadIdx.x];
         s_seedHash[threadIdx.x] = seedHash[threadIdx.x];
@@ -171,15 +166,13 @@ __global__ void ethash_search_kernel_optimized(
     const uint32_t MIX_WORDS = 32;
     const uint32_t DAG_PAIRS = dagSize / 128;
     const uint32_t NUM_ACCESSES = 64;
-    const uint32_t CACHE_SIZE = 1024;  // 8KB shared memory for DAG cache (128 pairs)
+    // Note: CACHE_SIZE removed - not used in this kernel version
     
     // Shared memory layout:
     // - s_header: 8 uint32 = 32 bytes
-    // - s_seedHash: 8 uint32 = 32 bytes
-    // - s_dagCache: 1024 uint64 = 8KB (cache for 128 DAG pairs)
+    // - s_seedHash: 8 uint32 = 32 bytes (unused in this kernel but kept for API consistency)
     __shared__ uint32_t s_header[8];
-    __shared__ uint32_t s_seedHash[8];
-    __shared__ uint64_t s_dagCache[CACHE_SIZE];
+    __shared__ uint32_t s_seedHash[8]; // used in final result hash construction
     
     // Cooperative loading of header and seedHash (once per block)
     if (threadIdx.x < 8) {
@@ -312,16 +305,20 @@ __global__ void ethash_search_kernel_texture(
 ) {
     // Shared memory for frequently accessed data
     __shared__ uint32_t s_header[8];
-    __shared__ uint32_t s_seedHash[16];
+    // Note: s_seedHash loaded but unused in this kernel version
+    // Removed unused extended seed hash buffer; only header is required for this variant.
+    // NOTE: seedHash not used in texture kernel; avoid allocating shared memory to reduce usage.
+    // __shared__ uint32_t s_seedHash[16]; (removed)
     
     // Cooperative loading into shared memory
     if (threadIdx.x < 8) {
         s_header[threadIdx.x] = header[threadIdx.x];
     }
-    if (threadIdx.x < 16) {
-        s_seedHash[threadIdx.x] = seedHash[threadIdx.x];
-    }
+    // Seed hash unused in texture variant; skip load.
     __syncthreads();
+    
+    // Suppress unused variable warning
+    // No seed hash usage; explicitly document omission.
     
     // Each thread processes multiple nonces
     const uint64_t threadId = blockIdx.x * blockDim.x + threadIdx.x;
@@ -506,24 +503,7 @@ extern "C" void launch_ethash_search_texture(
  * 
  * Processes multiple nonces per thread for better GPU utilization
  */
-__global__ void search_kernel_batch(
-    const uint8_t* header,
-    const uint64_t* dag,
-    uint64_t dagSize,
-    uint64_t startNonce,
-    uint32_t noncesPerThread,
-    uint64_t target,
-    uint32_t* solutions,
-    uint32_t* solutionCount,
-    uint32_t maxSolutions
-) {
-    uint64_t baseNonce = startNonce + (blockIdx.x * blockDim.x + threadIdx.x) * noncesPerThread;
-    
-    for (uint32_t i = 0; i < noncesPerThread; ++i) {
-        uint64_t nonce = baseNonce + i;
-        // TODO: Process each nonce (call ethash logic)
-    }
-}
+// Deprecated batch kernel removed: use ethash_search_kernel_optimized instead.
 
 /**
  * @brief Hash rate benchmark kernel

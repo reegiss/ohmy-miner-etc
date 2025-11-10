@@ -260,4 +260,3 @@ watch -n 1 'nvidia-smi dmon -s puc'
 **Status**: Ready for Performance Validation  
 **Branch**: trunk (commit 4150845)  
 **Date**: November 9, 2025
-

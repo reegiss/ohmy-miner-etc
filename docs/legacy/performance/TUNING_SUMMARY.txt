@@ -165,7 +165,7 @@
   ✓ Pool tested & verified stable
   ✓ Backward compatible (env var override)
   ✓ Production ready immediately
-  ✓ Economic benefit: $1,000-20,000/year per GPU
+  ✓ Economic benefit: $1,000-20,000 per GPU per year
   ✓ 100% test pass rate maintained
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -253,4 +253,3 @@ Generated: 9 de Novembro de 2025
 Commits: 1706c40, f0eb29b, 170f864
 Branch: trunk (pushed to origin/trunk)
 Status: ✅ COMPLETE
-

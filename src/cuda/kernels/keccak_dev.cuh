@@ -13,13 +13,21 @@ __device__ __forceinline__ uint64_t rotl64_dev(uint64_t x, int n) {
     return (x << n) | (x >> (64 - n));
 }
 
-// FNV prime constant - declared as extern, defined in keccak_constants.cu
-extern __constant__ uint32_t c_fnv_prime;
+// Some NVCC versions emit warning 20044 for extern __constant__ declarations.
+// Suppress it locally; definitions live in keccak_constants.cu.
+#ifdef __CUDACC__
+#pragma diag_suppress 20044
+#endif
+// FNV prime constant - defined in keccak_constants.cu
+extern __device__ __constant__ uint32_t c_fnv_prime;
 
-// Keccak constants - declared as extern, defined in keccak_constants.cu
-extern __constant__ uint64_t c_keccak_round_constants[24];
+// Keccak constants - defined in keccak_constants.cu
+extern __device__ __constant__ uint64_t c_keccak_round_constants[24];
 
-extern __constant__ int c_keccak_rotation_offsets[25];
+extern __device__ __constant__ int c_keccak_rotation_offsets[25];
+#ifdef __CUDACC__
+#pragma diag_default 20044
+#endif
 
 __device__ inline void keccak_f1600_dev(uint64_t state[25]) {
     for (int round = 0; round < 24; ++round) {

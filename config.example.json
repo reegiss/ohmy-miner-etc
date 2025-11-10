@@ -1,0 +1,19 @@
+{
+  "pool": {
+    "url": "stratum+tcp://etc.2miners.com:1010",
+    "wallet": "0xYourWalletAddressHere",
+    "worker": "worker01",
+    "use_tls": false
+  },
+  "devices": {
+    "gpu_ids": [0],
+    "threads_per_gpu": 1,
+    "intensity": 21
+  },
+  "general": {
+    "log_file": "ohmy-miner.log",
+    "log_level": "INFO",
+    "dag_cache_dir": "./dag-cache",
+    "benchmark": false
+  }
+}

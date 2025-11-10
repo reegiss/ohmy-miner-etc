@@ -298,7 +298,7 @@ git merge feature/phase4-async-callbacks
 
 ### Phase 7: Feature Additions
 - [ ] Stratum v2 protocol support
-- [ ] Pool switching on disconnect
+- [ ] Dynamic pool switching
 - [ ] Custom HTTP endpoint monitoring
 - [ ] JSON RPC 2.0 enhancements
 

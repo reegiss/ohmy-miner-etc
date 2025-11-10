@@ -166,9 +166,6 @@ Phase 2    : 7.80 MH/s
 Phase 2.5  : 8.02 MH/s (+2.8% from tuning)
 Phase 3    : 8.02321 MH/s (3-stream baseline)
 Phase 4.4  : 8.001 MH/s (GPU UNBLOCKED, -0.3% variance)
-
-Key: The slight variance (-0.3%) is MEASUREMENT NOISE, not a real
-     decrease. GPU is now FREE to launch next kernel immediately!
 ```
 
 ### Callback Overhead

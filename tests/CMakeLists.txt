@@ -33,6 +33,7 @@ add_executable(test_hex_utils
 # Phase 5: Multi-GPU unit tests
 add_executable(test_multi_gpu
     test_multi_gpu.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/core/device_state.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/hex_utils.cpp
     ${PROJECT_SOURCE_DIR}/src/core/ethash.cpp
@@ -40,10 +41,17 @@ add_executable(test_multi_gpu
     ${PROJECT_SOURCE_DIR}/src/network/stratum_client.cpp
     ${PROJECT_SOURCE_DIR}/src/network/connection.cpp
     ${PROJECT_SOURCE_DIR}/src/cuda/device_manager.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/threading/mining_thread.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/stats/device_stats.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/pipeline/pipeline_manager.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/pipeline/search_executor.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/utils/memory_profiler.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/modules/device_initializer.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/result_callback.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel_warp.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/kernels/keccak_constants.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/kernels/kernel_launcher.cpp
 )
 
 target_link_libraries(test_ethash PRIVATE Threads::Threads)
@@ -57,6 +65,7 @@ target_include_directories(test_dag PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(test_stratum PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(test_hex_utils PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(test_multi_gpu PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(test_multi_gpu PRIVATE ${PROJECT_SOURCE_DIR}/src/cuda)
 
 # Benchmark tests - compile separately
 add_executable(bench_ethash
@@ -68,6 +77,7 @@ add_executable(bench_ethash
 
 add_executable(bench_cuda
     benchmark/bench_cuda_kernels.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/core/device_state.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/logger.cpp
     ${PROJECT_SOURCE_DIR}/src/utils/hex_utils.cpp
     ${PROJECT_SOURCE_DIR}/src/core/ethash.cpp
@@ -75,10 +85,17 @@ add_executable(bench_cuda
     ${PROJECT_SOURCE_DIR}/src/network/stratum_client.cpp
     ${PROJECT_SOURCE_DIR}/src/network/connection.cpp
     ${PROJECT_SOURCE_DIR}/src/cuda/device_manager.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/threading/mining_thread.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/stats/device_stats.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/pipeline/pipeline_manager.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/pipeline/search_executor.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/utils/memory_profiler.cpp
+    ${PROJECT_SOURCE_DIR}/src/cuda/modules/device_initializer.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/result_callback.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/kernels/search_kernel_warp.cu
     ${PROJECT_SOURCE_DIR}/src/cuda/kernels/keccak_constants.cu
+    ${PROJECT_SOURCE_DIR}/src/cuda/kernels/kernel_launcher.cpp
 )
 
 target_link_libraries(bench_cuda PRIVATE ${CUDA_LIBRARIES} Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
@@ -86,6 +103,7 @@ target_link_libraries(bench_cuda PRIVATE ${CUDA_LIBRARIES} Threads::Threads)
 
 target_include_directories(bench_ethash PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(bench_cuda PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(bench_cuda PRIVATE ${PROJECT_SOURCE_DIR}/src/cuda)
 
 # Add tests to CTest
 add_test(NAME TestEthash COMMAND test_ethash)

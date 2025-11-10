@@ -183,20 +183,28 @@ int main(int argc, char* argv[]) {
             static uint32_t currentDagEpoch = UINT32_MAX;
             if (job.epoch != currentDagEpoch) {
                 LOG_INFO("Generating DAG for epoch " + std::to_string(job.epoch) + "...");
-                // Use GPU DAG generation for faster startup (pass true)
+                // GPU-FIRST: Generate DAG directly in GPU memory
                 const void* dagData = dagGenerator.generate(job.epoch, true);
                 size_t dagSize = dagGenerator.getSize();
-                if (dagData == nullptr || dagSize == 0) {
+                void* d_dag = dagGenerator.getGpuPointer();
+                
+                if (dagData == nullptr || dagSize == 0 || d_dag == nullptr) {
                     LOG_ERROR("Failed to generate DAG for epoch " + std::to_string(job.epoch));
                     g_running = false;
                     return;
                 }
-                if (!deviceManager.initDevice(config.deviceId, dagData, dagSize)) {
+                
+                // Zero-copy: Use GPU pointer directly (no H→D copy)
+                if (!deviceManager.initDeviceZeroCopy(config.deviceId, d_dag, dagSize)) {
                     LOG_ERROR("Failed to init GPU with DAG epoch " + std::to_string(job.epoch));
                     g_running = false;
                     return;
                 }
-                LOG_INFO("DAG ready, epoch " + std::to_string(job.epoch) + " (" + std::to_string(dagSize / (1024*1024)) + " MB)");
+                
+                // CRITICAL: Free host RAM placeholder (DAG is GPU-only)
+                dagGenerator.freeHostMemory();
+                
+                LOG_INFO("DAG ready, epoch " + std::to_string(job.epoch) + " (" + std::to_string(dagSize / (1024*1024)) + " MB) [GPU-resident, zero-copy]");
                 currentDagEpoch = job.epoch;
             }
         });
@@ -346,7 +354,7 @@ int main(int argc, char* argv[]) {
                 LOG_INFO(nss.str());
             }
             
-            totalHashes += searchRange;
+            // Note: totalHashes is updated inside searchAsync (counts only completed work)
 
             // For diagnostics: show head of target and fabricated example hash distribution sample every ~15s
             static auto lastDiag = std::chrono::steady_clock::now();

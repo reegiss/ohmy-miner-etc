@@ -1,5 +1,7 @@
 # Architecture Overview
 
+For a categorized list of all documents, see [INDEX.md](./INDEX.md). This file focuses on the high-level architecture and how modules fit together.
+
 ## Project Structure
 
 ```
@@ -16,7 +18,11 @@ ohmy-miner-etc/
 │   ├── types.hpp                   # Common types and structures
 │   ├── miner.hpp                   # Main miner interface
 │   ├── ethash.hpp                  # Ethash algorithm
-│   ├── device_manager.hpp          # CUDA device management
+│   ├── cuda/
+│   │   ├── core/                   # Device state, solutions, job context (public headers)
+│   │   ├── pipeline/               # PipelineManager public headers
+│   │   ├── stats/                  # DeviceStatsUtil public headers
+│   │   └── utils/                  # CUDA_CHECK and helpers
 │   ├── stratum_client.hpp          # Pool communication
 │   ├── dag_generator.hpp           # DAG generation
 │   ├── logger.hpp                  # Logging system
@@ -27,10 +33,13 @@ ohmy-miner-etc/
 │   │   ├── miner.cpp              # Miner implementation
 │   │   └── ethash.cpp             # Ethash implementation
 │   ├── cuda/
-│   │   ├── device_manager.cu      # GPU device manager
+│   │   ├── core/                   # Mining engine and core logic
+│   │   ├── pipeline/               # Async N-stream pipeline implementation
+│   │   ├── stats/                  # Stats aggregation implementation
+│   │   ├── threading/              # Mining thread orchestration
 │   │   └── kernels/
-│   │       ├── ethash_kernel.cu   # Ethash CUDA kernel
-│   │       └── search_kernel.cu   # Optimized search kernels
+│   │       ├── ethash_kernel.cu    # Legacy/placeholder kernel
+│   │       └── search_kernel.cu    # Optimized search kernels (base/optimized/texture/warp)
 │   ├── network/
 │   │   ├── stratum_client.cpp     # Stratum client
 │   │   └── connection.cpp         # Network connection
