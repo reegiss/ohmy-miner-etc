@@ -95,26 +95,20 @@ __global__ void ethash_search_kernel(
     // Final result = keccak256(seedHash || compressedMix)
     // According to Ethash: mix digest (compressed) + seedHash -> keccak256
     uint8_t finIn[64];
-    // First 32 bytes: seedHash
+    // First 32 bytes: compressed mix
+    memcpy(finIn, compressed, 32);
+    // Next 32 bytes: seedHash
     #pragma unroll
-    for (int i = 0; i < 8; ++i) ((uint32_t*)finIn)[i] = s_seedHash[i];
-    // Next 32 bytes: compressed mix
-    memcpy(finIn + 32, compressed, 32);
+    for (int i = 0; i < 8; ++i) ((uint32_t*)(finIn + 32))[i] = s_seedHash[i];
     uint8_t result_hash[32];
     keccak256_dev(finIn, sizeof(finIn), result_hash);
 
     // Ethash compares the 256-bit integer in big-endian form to the target boundary.
     // Convert result to big-endian for direct byte compare:
-    uint8_t resultBE[32];
-    #pragma unroll
-    for (int i = 0; i < 32; ++i) {
-        resultBE[i] = result_hash[31 - i];
-    }
-
     int cmp = 0;
     #pragma unroll
     for (int i = 0; i < 32; ++i) {
-        uint8_t a = resultBE[i];
+        uint8_t a = result_hash[i];
         uint8_t b = targetBE[i];
         if (a < b) { cmp = -1; break; }
         if (a > b) { cmp = 1; break; }
@@ -215,12 +209,10 @@ __global__ void ethash_search_kernel_optimized(
             uint32_t pairIndex = fnv1a(i ^ s0, mix[i % MIX_WORDS]) % DAG_PAIRS;
             uint64_t dagOffset = (pairIndex * 2u) * 8u;
             
-            // Check bounds before access
-            if (dagOffset + 16 >= dagSize) {
-                continue;  // Skip out-of-bounds access
-            }
-            
-            // Direct read from global memory (still benefits from L2 cache)
+        // Check bounds before access
+        // if (dagOffset + 16 >= dagSize) {
+        //     continue;  // Skip out-of-bounds access
+        // }            // Direct read from global memory (still benefits from L2 cache)
             // Future: implement proper cooperative loading with bounds checking
             const uint32_t* dagItem0 = reinterpret_cast<const uint32_t*>(&dag[dagOffset]);
             const uint32_t* dagItem1 = reinterpret_cast<const uint32_t*>(&dag[dagOffset + 8]);
@@ -244,27 +236,23 @@ __global__ void ethash_search_kernel_optimized(
         
         // Final result = keccak256(seedHash || compressedMix)
         uint8_t finIn[64];
+        // First 32 bytes: compressed mix
+        memcpy(finIn, compressed, 32);
+        // Next 32 bytes: seedHash
         #pragma unroll 8
-        for (int i = 0; i < 8; ++i) ((uint32_t*)finIn)[i] = s_seedHash[i];
-        memcpy(finIn + 32, compressed, 32);
+        for (int i = 0; i < 8; ++i) ((uint32_t*)(finIn + 32))[i] = s_seedHash[i];
         uint8_t result_hash[32];
         keccak256_dev(finIn, sizeof(finIn), result_hash);
         
         // Convert result to big-endian for comparison
-        uint8_t resultBE[32];
-        #pragma unroll 32
-        for (int i = 0; i < 32; ++i) {
-            resultBE[i] = result_hash[31 - i];
-        }
-        
-        // Compare against target (early exit on first mismatch)
         int cmp = 0;
         #pragma unroll 32
-        for (int i = 0; i < 32; ++i) {
-            uint8_t a = resultBE[i];
-            uint8_t b = targetBE[i];
-            if (a < b) { cmp = -1; break; }
-            if (a > b) { cmp = 1; break; }
+        for (int i = 0; i < 32 && cmp == 0; ++i) {
+            if (result_hash[i] < targetBE[i]) {
+                cmp = -1;
+            } else if (result_hash[i] > targetBE[i]) {
+                cmp = 1;
+            }
         }
         
         // If valid solution, store atomically
@@ -365,7 +353,7 @@ __global__ void ethash_search_kernel_texture(
             const uint64_t parentIndex = t % numParents;
             const uint64_t dagIdx = parentIndex * 16;
             
-            if (dagIdx + 15 < dagSize) {
+            // if (dagIdx + 15 < dagSize) {
                 // TEXTURE FETCH: Use tex1Dfetch for DAG access
                 // This leverages L1 texture cache for better performance
                 #pragma unroll 16
@@ -375,7 +363,7 @@ __global__ void ethash_search_kernel_texture(
                     mix[j] = fnv1a(mix[j], (uint32_t)dagValue);
                     mix[j + 16] = fnv1a(mix[j + 16], (uint32_t)(dagValue >> 32));
                 }
-            }
+            // }
         }
         
         // Compress mix to 32 bytes
@@ -389,8 +377,8 @@ __global__ void ethash_search_kernel_texture(
         
         // Final Keccak256
         uint8_t final_input[64 + 32];
-        memcpy(final_input, seed, 64);
-        memcpy(final_input + 64, compressed, 32);
+        memcpy(final_input, compressed, 32);
+        memcpy(final_input + 32, seed, 64);
         
         uint8_t result_hash[32];
         keccak256_dev(final_input, 96, result_hash);

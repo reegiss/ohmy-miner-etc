@@ -1,0 +1,306 @@
+#include "ohmy/mining_engine.hpp"
+#include "ohmy/logger.hpp"
+#include <iostream>
+#include <csignal>
+#include <atomic>
+
+using namespace ohmy;
+
+// Global flag for graceful shutdown
+std::atomic<bool> g_running{true};
+
+void signalHandler(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        LOG_INFO("Shutdown signal received, stopping miner...");
+        g_running = false;
+    }
+}
+
+void printBanner() {
+    // Minimal banner to align with T-Rex style (keep it short & professional)
+    std::cout << "OhMy Miner ETC v1.0 - Ethereum Classic GPU Miner" << std::endl;
+}
+
+void printUsage(const char* programName) {
+    std::cout << "Usage: " << programName << " [options]\n\n"
+              << "Required options:\n"
+              << "  --pool <url:port>       Mining pool URL and port\n"
+              << "  --wallet <address>      ETC wallet address\n\n"
+              << "Optional:\n"
+              << "  --worker <name>         Worker name (default: empty)\n"
+              << "  --device <id>           GPU device ID (default: 0)\n"
+              << "  --verbose               Enable verbose logging\n"
+              << "  --help                  Show this help message\n\n"
+              << "Example:\n"
+              << "  " << programName << " --pool eu1-etc.ethermine.org:4444 \\\n"
+              << "                  --wallet 0x1234...abcd --worker rig1\n"
+              << std::endl;
+}
+
+struct Config {
+    std::string poolUrl;
+    std::string walletAddress;
+    std::string workerName;
+    int deviceId = 0;
+    bool verbose = false;
+    std::string cacheDir = "./dag-cache";
+};;
+
+bool parseArgs(int argc, char* argv[], Config& config) {
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        
+        if (arg == "--help" || arg == "-h") {
+            return false;
+        } else if (arg == "--pool" && i + 1 < argc) {
+            config.poolUrl = argv[++i];
+        } else if (arg == "--wallet" && i + 1 < argc) {
+            config.walletAddress = argv[++i];
+        } else if (arg == "--worker" && i + 1 < argc) {
+            config.workerName = argv[++i];
+        } else if (arg == "--device" && i + 1 < argc) {
+            config.deviceId = std::stoi(argv[++i]);
+        } else if (arg == "--verbose" || arg == "-v") {
+            config.verbose = true;
+        } else {
+            std::cerr << "Unknown option: " << arg << std::endl;
+            return false;
+        }
+    }
+    
+    // Validate required options
+    if (config.poolUrl.empty()) {
+        std::cerr << "Error: --pool is required\n";
+        return false;
+    }
+    if (config.walletAddress.empty()) {
+        std::cerr << "Error: --wallet is required\n";
+        return false;
+    }
+    
+    return true;
+}
+
+int main(int argc, char* argv[]) {
+    // Parse command line arguments
+    Config config;
+    if (!parseArgs(argc, argv, config)) {
+        printUsage(argv[0]);
+        return 1;
+    }
+    
+    // Print banner
+    printBanner();
+    
+    // Set up signal handlers for graceful shutdown
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+    
+    // Set log level
+    if (config.verbose) {
+        utils::Logger::setLevel(utils::LogLevel::DEBUG);
+    }
+    
+    LOG_INFO("OhMy Miner ETC v1.0");
+    LOG_INFO("");
+    LOG_INFO("URL : stratum+tcp://" + config.poolUrl);
+    LOG_INFO("USER: " + config.walletAddress);
+    if (!config.workerName.empty()) {
+        LOG_INFO("WRK : " + config.workerName);
+    }
+    LOG_INFO("");
+    
+    try {
+        // Create mining engine configuration
+        MiningEngine::Config engineConfig;
+        engineConfig.poolUrl = config.poolUrl;
+        engineConfig.walletAddress = config.walletAddress;
+        engineConfig.workerName = config.workerName;
+        engineConfig.deviceId = config.deviceId;
+        engineConfig.cacheDir = config.cacheDir;
+        
+        // Create and initialize mining engine
+        MiningEngine engine(engineConfig);
+        
+        if (!engine.initialize()) {
+            LOG_ERROR("Failed to initialize mining engine");
+            return 1;
+        }
+        
+        // Run main mining loop (blocks until g_running = false)
+        engine.run(g_running);
+        
+        // Print final statistics
+        auto stats = engine.getStatistics();
+        LOG_INFO("\n═══════════════════════════════════════════════════");
+        LOG_INFO("  Final Statistics:");
+        LOG_INFO("  Total Hashes: " + std::to_string(stats.totalHashes));
+        LOG_INFO("  Accepted Shares: " + std::to_string(stats.acceptedShares));
+        LOG_INFO("  Rejected Shares: " + std::to_string(stats.rejectedShares));
+        LOG_INFO("  Uptime: " + std::to_string(static_cast<int>(stats.uptime)) + "s");
+        LOG_INFO("═══════════════════════════════════════════════════");
+        LOG_INFO("Thank you for mining with OhMy Miner! 🎉");
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("Fatal error: " + std::string(e.what()));
+        return 1;
+    }
+    
+    return 0;
+}
+                LOG_INFO(mixLog.str());
+                // Also log nonce hex for transparency
+                std::stringstream nss; nss << "First solution nonce: 0x" << std::hex << std::setw(16) << std::setfill('0') << first.nonce;
+                LOG_INFO(nss.str());
+            }
+            
+            // Note: totalHashes is updated inside searchAsync (counts only completed work)
+
+            // For diagnostics: show head of target and fabricated example hash distribution sample every ~15s
+            static auto lastDiag = std::chrono::steady_clock::now();
+            if (now - lastDiag > 15s) {
+                std::stringstream tss; tss << "Target (full): ";
+                for (int i = 0; i < 32; ++i) tss << std::hex << std::setw(2) << std::setfill('0') << (int)currentTarget256[i];
+                LOG_DEBUG(tss.str());
+                
+                // Also log in little-endian format for comparison
+                std::stringstream tss_le; tss_le << "Target (LE):   ";
+                for (int i = 31; i >= 0; --i) tss_le << std::hex << std::setw(2) << std::setfill('0') << (int)currentTarget256[i];
+                LOG_DEBUG(tss_le.str());
+                
+                lastDiag = now;
+            }
+            
+            if (numFound > 0) {
+                // Set jobId for all solutions
+                for (auto& solution : solutions) {
+                    solution.jobId = miningJobId;
+                }
+                
+                // If job changed during the GPU batch, discard solutions (avoid stale shares)
+                if (currentJob.jobId != miningJobId) {
+                    LOG_INFO("Job changed, discarding " + std::to_string(numFound) + " solutions");
+                } else {
+                    LOG_INFO("Share found! Submitting " + std::to_string(numFound) + " solution(s)...");
+                    
+                    if (debugTargetOverride) {
+                        LOG_WARN("Debug target override active: NOT submitting shares to pool");
+                    }
+                    
+                    // Submit shares one by one, checking if job changed before each submission
+                    uint32_t submitted = 0;
+                    for (auto& solution : solutions) {
+                        if (debugTargetOverride) {
+                            continue; // skip submission when debug target is active
+                        }
+                        // Check if job changed before submitting
+                        if (currentJob.jobId != miningJobId) {
+                            LOG_WARN("Job changed during submission, discarding remaining " + std::to_string(numFound - submitted) + " shares");
+                            break;
+                        }
+                        if (stratumClient.submitSolution(solution)) {
+                            acceptedShares++;
+                            LOG_INFO("✓ Share accepted (" + std::to_string(acceptedShares) + " total)");
+                        } else {
+                            LOG_WARN("✗ Share rejected by pool");
+                        }
+                        submitted++;
+                    }
+                }
+            }
+            
+            // Print stats every 30 seconds (T-Rex style)
+            if (now - lastStatsTime > 30s) {
+                double hashRate = deviceManager.getHashRate(config.deviceId);
+                auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - programStart).count();
+                
+                // Format uptime like T-Rex
+                std::string uptimeStr;
+                if (uptime < 60) {
+                    uptimeStr = std::to_string(uptime) + " sec" + (uptime > 1 ? "s" : "");
+                } else if (uptime < 3600) {
+                    int mins = uptime / 60;
+                    int secs = uptime % 60;
+                    uptimeStr = std::to_string(mins) + " min" + (mins > 1 ? "s" : "") + " " + std::to_string(secs) + " sec" + (secs > 1 ? "s" : "");
+                } else {
+                    int hours = uptime / 3600;
+                    int mins = (uptime % 3600) / 60;
+                    int secs = uptime % 60;
+                    uptimeStr = std::to_string(hours) + " hr" + (hours > 1 ? "s" : "") + " " + std::to_string(mins) + " min" + (mins > 1 ? "s" : "");
+                }
+                
+                // Get difficulty in G format
+                // Note: difficulty from pool is in units of 2^32 nonces per share
+                // For display: show as difficulty (no conversion for small values like 2)
+                // For large values: show in G (gigahashes = 1e9)
+                double diffValue = static_cast<double>(lastDifficulty);
+                std::ostringstream diffStream;
+                if (diffValue >= 1e9) {
+                    diffStream << std::fixed << std::setprecision(2) << (diffValue / 1e9) << " G";
+                } else {
+                    diffStream << std::fixed << std::setprecision(0) << diffValue;
+                }
+                
+                // Format hashrate in MH/s
+                std::ostringstream hashStream;
+                hashStream << std::fixed << std::setprecision(2) << (hashRate / 1e6);
+                
+                // T-Rex style separator line and stats
+                std::cout << "\n---------------------";
+                auto t = std::time(nullptr);
+                auto tm = *std::localtime(&t);
+                std::cout << std::put_time(&tm, "%Y%m%d %H:%M:%S");
+                std::cout << " ---------------------\n";
+                
+                std::ostringstream poolLine;
+                poolLine << "Mining at " << config.poolUrl << ", diff: " << diffStream.str();
+                LOG_INFO(poolLine.str());
+                
+                std::ostringstream gpuLine;
+                gpuLine << "GPU #0: " << devices[0].name << " - " << hashStream.str() << " MH/s";
+                LOG_INFO(gpuLine.str());
+                
+                LOG_INFO("Shares/min: 0");
+                LOG_INFO("Uptime: " + uptimeStr + " | Algo: etchash | OhMy-Miner v1.0");
+                
+                lastStatsTime = now;
+            }
+            
+            // PHASE 6: Minimal sleep (1us) - async pipeline manages back-pressure via cudaEventQuery
+            // The searchAsync() function is non-blocking and uses event queries to pace the loop
+            // CPU can spin very fast since most time is spent on GPU kernels executing in parallel
+            std::this_thread::sleep_for(1us);
+
+            // Add CPU usage throttling to reduce high CPU load
+            static int throttleCounter = 0;
+            if (++throttleCounter % 1000 == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            // Reduce CPU load by adding a sleep interval in the mining loop
+            static int miningLoopCounter = 0;
+            if (++miningLoopCounter % 500 == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+        
+        // Cleanup
+        LOG_INFO("\n🛑 Stopping miner...");
+        stratumClient.disconnect();
+        LOG_INFO("✓ Disconnected from pool");
+        
+        // Final stats
+        LOG_INFO("\n═══════════════════════════════════════════════════");
+        LOG_INFO("  Final Statistics:");
+        LOG_INFO("  Total Hashes: " + std::to_string(totalHashes));
+        LOG_INFO("  Accepted Shares: " + std::to_string(acceptedShares));
+        LOG_INFO("═══════════════════════════════════════════════════");
+        LOG_INFO("Thank you for mining with OhMy Miner! 🎉");
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("Fatal error: " + std::string(e.what()));
+        return 1;
+    }
+    
+    return 0;
+}

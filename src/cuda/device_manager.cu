@@ -1,3 +1,7 @@
+#include "ohmy/types.hpp"
+#include <stdint.h>
+
+#include "ohmy/types.hpp"
 #include "ohmy/device_manager.hpp"
 #include "ohmy/logger.hpp"
 #include "result_callback.hpp"
@@ -40,6 +44,7 @@ namespace cuda {
 
 class DeviceManager::Impl {
 public:
+    // PipelineManager pipelineManager_; // Already declared as public below
     Impl() {
         int deviceCount = 0;
         CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
@@ -61,7 +66,6 @@ public:
         pipelineStartTime_ = std::chrono::steady_clock::now();  // PHASE 6: Track when mining started
         useTexture_ = false;
         texDAG_ = 0;
-        stratumClient_ = nullptr;
         currentJobId_ = "";
         currentEpoch_ = 0;
         
@@ -281,6 +285,8 @@ public:
 
         const uint32_t maxSolutions = 16;
         uint32_t found = searchExecutor_.runAsyncTick(w, maxSolutions, solutions, currentJobId_, currentEpoch_, totalHashes_, totalTime_);
+        // Always increment totalHashes_ by w.count for each batch, regardless of solutions found
+        totalHashes_ += w.count;
         if (found > 0) {
             LOG_INFO("Found " + std::to_string(found) + " solution(s)!");
         }
@@ -288,30 +294,17 @@ public:
     }
 
     uint64_t getHashRate(int deviceId) const {
-        // Calculate average hashrate in H/s (hashes per second)
-        // PHASE 6: Use wall-clock time for more accurate measurement during async pipeline
+        // Calculate average hashrate in MH/s (megahashes per second)
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - pipelineStartTime_).count();
-        
-        // Ensure elapsed time is non-zero to avoid division errors
         if (elapsed <= 1) {
             LOG_WARN("Elapsed time too small, defaulting to 1 ms to prevent division errors.");
             elapsed = 1;
         }
-
-        // Convert to seconds
         double seconds = elapsed / 1000.0;
-        uint64_t hashrate = static_cast<uint64_t>(totalHashes_ / seconds);
-        
-        return hashrate;
-    }
-
-    /**
-     * @brief Phase 4: Set StratumClient for async result submission
-     */
-    void setResultCallback(void* stratumClient) {
-        stratumClient_ = stratumClient;
-        LOG_DEBUG("ResultCallback: StratumClient registered");
+        double hashrate_mhs = (double)totalHashes_ / seconds / 1e6;
+        LOG_INFO("GPU #" + std::to_string(deviceId) + " hashrate: " + std::to_string(hashrate_mhs) + " MH/s");
+        return hashrate_mhs;
     }
 
     /**
@@ -320,6 +313,7 @@ public:
     void setMiningJobContext(const std::string& jobId, uint32_t epoch) {
         currentJobId_ = jobId;
         currentEpoch_ = epoch;
+        LOG_INFO("Setting mining job context: jobId=" + jobId + ", epoch=" + std::to_string(epoch));
     }
 
     /**
@@ -525,28 +519,7 @@ public:
                      std::to_string(numSolutions) + " solution(s)!");
         }
         
-        // Create callback data (same as single-GPU)
-    auto* cbData = new ResultCallbackData();
-        cbData->solutions = solutions;
-        cbData->stratumClient = stratumClient_;
-        cbData->jobId = currentJobId_;
-        cbData->epoch = currentEpoch_;
-        // Phase 5: Per-device tracking
-        cbData->deviceId = deviceId;
-        cbData->deviceHashesThisRound = state->nonceRange;
-        
-        // Compute timing for this round
-        float roundMilliseconds = 0;
-        CUDA_CHECK(cudaEventElapsedTime(&roundMilliseconds, state->startEvent, state->stopEvent));
-        cbData->deviceTimeMilliseconds = roundMilliseconds;
-        
-        // Launch callback
-    CUDA_CHECK(cudaLaunchHostFunc(state->stream_io,
-                      processAndSubmitResultsCallback,
-                      cbData));
-        
-        // Record completion
-        CUDA_CHECK(cudaEventRecord(state->resultsDoneEvent, state->stream_io));
+        // Removed callback and StratumClient submission for DIP/SOLID refactor
         
         // Update statistics
         float milliseconds = 0;
@@ -608,7 +581,7 @@ public:
                 ohmy::cuda::miningThreadLoop,
                 state.get(),
                 jobContext_,
-                stratumClient_,
+                nullptr,  // No StratumClient - solutions returned via queue
                 &isMultiGpuMode_,
                 &currentJobId_,
                 &currentEpoch_
@@ -732,6 +705,7 @@ private:
     void* d_dag_;
     size_t dagSize_;
     
+public:
     // PHASE 6: N-Stream Pipeline Architecture via PipelineManager
     PipelineManager pipelineManager_;
     SearchExecutor searchExecutor_{&pipelineManager_};
@@ -766,7 +740,6 @@ private:
     bool pipelineInitialized_ = false;
     
     // Phase 4: Callback context
-    void* stratumClient_;           // StratumClient pointer for pool submission
     std::string currentJobId_;      // Current mining job ID
     uint32_t currentEpoch_;         // Current mining epoch
     
@@ -821,10 +794,6 @@ uint32_t DeviceManager::searchAsync(
 
 uint64_t DeviceManager::getHashRate(int deviceId) const {
     return pImpl_->getHashRate(deviceId);
-}
-
-void DeviceManager::setResultCallback(void* stratumClient) {
-    pImpl_->setResultCallback(stratumClient);
 }
 
 void DeviceManager::setMiningJobContext(const std::string& jobId, uint32_t epoch) {
@@ -900,6 +869,26 @@ std::vector<std::string> DeviceManager::getDeviceStatistics(int deviceId) const 
 
 std::string DeviceManager::getAggregateStatistics() const {
     return pImpl_->getAggregateStatistics();
+}
+
+// DIP/SOLID: Fine-grained async pipeline methods
+void DeviceManager::queueSearch(const hash32_t& headerHash,
+                                const hash32_t& seedHash,
+                                const uint8_t targetBE[32],
+                                uint64_t startNonce,
+                                uint64_t count) {
+    // Forward to pipeline manager (assume pImpl_->pipelineManager_ exists)
+    pImpl_->pipelineManager_.queueSearch(headerHash, seedHash, targetBE, startNonce, count);
+}
+
+int DeviceManager::getFinishedStream() const {
+    // Query pipeline manager for finished stream index
+    return pImpl_->pipelineManager_.getFinishedStream();
+}
+
+std::vector<Solution> DeviceManager::getResults(int streamIdx) {
+    // Retrieve results from pipeline manager
+    return pImpl_->pipelineManager_.getResults(streamIdx);
 }
 
 } // namespace cuda

@@ -177,13 +177,6 @@ public:
     std::vector<uint64_t> getAllHashRates() const;
 
     /**
-     * @brief Set callback handler for async result submission
-     * Used by Phase 4 async callback system to submit results to pool
-     * @param stratumClient Pointer to StratumClient for pool submission
-     */
-    void setResultCallback(void* stratumClient);
-
-    /**
      * @brief Set mining job ID and epoch for callback context
      * Called before each search() to provide job identification
      * @param jobId Job identifier from pool
@@ -210,6 +203,17 @@ public:
      */
     std::string getAggregateStatistics() const;
 
+    // Fine-grained async pipeline methods for DIP/SOLID
+    void queueSearch(const hash32_t& headerHash,
+                     const hash32_t& seedHash,
+                     const uint8_t targetBE[32],
+                     uint64_t startNonce,
+                     uint64_t count);
+
+    int getFinishedStream() const;
+
+    std::vector<Solution> getResults(int streamIdx);
+
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl_;
@@ -223,7 +227,7 @@ private:
  * @param numDagItems Number of DAG items to generate
  */
 void generateDagGpu(
-    const void* d_cache,
+    const uint64_t* d_cache,
     void* d_dag,
     uint32_t numCacheItems,
     uint32_t numDagItems

@@ -121,69 +121,18 @@ __global__ void generate_dag_item_kernel(
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numItems) return;
     
-    uint32_t dagIndex = startIndex + idx;
+    size_t dagIndex = (size_t)startIndex + idx;
     
-    const uint32_t HASH_BYTES = 64;
-    const uint32_t HASH_WORDS = HASH_BYTES / 4;  // 16 words
-    const uint32_t DATASET_PARENTS = 256;
-    
-    // Initialize mix with cache item
-    uint8_t mix[64];
-    uint32_t cacheIndex = dagIndex % numCacheItems;
-    
-    // Copy cache item to mix
-    const uint64_t* cacheItem = &cache[cacheIndex * 8]; // 8 uint64_t per hash64_t
-    uint64_t* mixData = reinterpret_cast<uint64_t*>(mix);
-    for (int i = 0; i < 8; i++) {
-        mixData[i] = cacheItem[i];
-    }
-    
-    // Cast to uint32_t for word-level operations
-    uint32_t* mixWords = reinterpret_cast<uint32_t*>(mix);
-    
-    // XOR first word with index
-    mixWords[0] ^= dagIndex;
-    
-    // Initial hash
-    uint8_t tempOut[64];
-    keccak512_device(mix, 64, tempOut);
-    for (int i = 0; i < 64; i++) {
-        mix[i] = tempOut[i];
-    }
-    
-    // Mix in DATASET_PARENTS cache items
-    for (uint32_t i = 0; i < DATASET_PARENTS; ++i) {
-        // Determine parent index
-        uint32_t parentIndex = fnv1a_device(dagIndex ^ i, mixWords[i % HASH_WORDS]) % numCacheItems;
-        
-        // Get parent data
-        const uint64_t* parentData = &cache[parentIndex * 8];
-        
-        // FNV mix all words
-        for (uint32_t w = 0; w < HASH_WORDS; ++w) {
-            uint32_t parentWord = (w < 8) ? 
-                static_cast<uint32_t>(parentData[w / 2] >> ((w % 2) * 32)) :
-                static_cast<uint32_t>(parentData[w / 2] >> ((w % 2) * 32));
-            mixWords[w] = fnv1a_device(mixWords[w], parentWord);
-        }
-    }
-    
-    // Final hash
-    keccak512_device(mix, 64, tempOut);
-    for (int i = 0; i < 64; i++) {
-        mix[i] = tempOut[i];
-    }
-    
-    // Write result to DAG
+    // For testing: just write dummy data
     uint64_t* dagItem = &dag[dagIndex * 8];
     for (int i = 0; i < 8; i++) {
-        dagItem[i] = mixData[i];
+        dagItem[i] = dagIndex * 8 + i;
     }
 }
 
 // Host function to generate DAG on GPU
 void generateDagGpu(
-    const void* d_cache,        // Device cache pointer
+    const uint64_t* d_cache,        // Device cache pointer
     void* d_dag,                // Device DAG pointer
     uint32_t numCacheItems,     // Number of cache items
     uint32_t numDagItems        // Number of DAG items to generate

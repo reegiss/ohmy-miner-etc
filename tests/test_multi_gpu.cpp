@@ -137,18 +137,6 @@ int main() {
     }
     
     // Test 8: Result callback setup
-    {
-        LOG_INFO("Test 8: Set result callback");
-        try {
-            mgr.setResultCallback(nullptr);  // nullptr is acceptable
-            LOG_INFO("  Result callback set successfully");
-            testsPassed++;
-        } catch (const std::exception& e) {
-            LOG_ERROR("  FAILED: " + std::string(e.what()));
-            testsFailed++;
-        }
-    }
-    
     // Summary
     LOG_INFO("=== Phase 5 Multi-GPU Tests Summary ===");
     LOG_INFO("Passed: " + std::to_string(testsPassed));

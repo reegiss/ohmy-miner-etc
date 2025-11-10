@@ -63,135 +63,117 @@ public:
         auto cache = Ethash::calculateCache(epoch);
         LOG_INFO("  ✓ Cache generated (" + std::to_string(cache.size()) + " items)");
 
-        // Allocate DAG memory
-        // Free old DAG if exists (but preserve dagSize_ for new allocation)
+        // For GPU-first generation we avoid allocating the full DAG in host RAM.
+        // Many DAG implementations allocate a large host buffer which causes a giant
+        // virtual memory footprint and high memory pressure. Instead, when `useGpu`
+        // is true we keep the DAG resident in GPU memory only and use a small
+        // placeholder in host memory for API compatibility.
+
+        // Free previous host placeholder if present
         if (dagData_ != nullptr) {
             std::free(dagData_);
             dagData_ = nullptr;
         }
-        
-        size_t allocSize = dagSize_;
-        LOG_INFO("  Allocating " + std::to_string(allocSize / (1024*1024)) + " MB for DAG (" + std::to_string(allocSize) + " bytes)...");
-        try {
-            dagData_ = std::malloc(allocSize);
-            if (dagData_ == nullptr) {
-                LOG_ERROR("Failed to allocate DAG memory");
-                return nullptr;
-            }
-            LOG_INFO("  ✓ Memory allocated at " + std::to_string(reinterpret_cast<uintptr_t>(dagData_)));
-        } catch (const std::exception& e) {
-            LOG_ERROR("Exception during allocation: " + std::string(e.what()));
-            return nullptr;
-        }
-        
-        hash64_t* dag = static_cast<hash64_t*>(dagData_);
 
         // Generate DAG items
         LOG_INFO("  Generating DAG items...");
         auto startTime = std::chrono::steady_clock::now();
         
-        if (useGpu) {
-            LOG_INFO("  Using GPU for DAG generation");
-            
-            // Allocate GPU memory for cache
-            void* d_cache = nullptr;
-            void* d_dag = nullptr;
-            
-            size_t cacheBytes = cache.size() * sizeof(hash64_t);
-            cudaError_t err = cudaMalloc(&d_cache, cacheBytes);
-            if (err != cudaSuccess) {
-                LOG_ERROR("  Failed to allocate GPU cache memory: " + std::string(cudaGetErrorString(err)));
-                LOG_ERROR("  GPU is REQUIRED for mining (no CPU fallback)");
-                return nullptr;
-            }
-            
-            if (useGpu) {
-                // Allocate GPU memory for DAG
-                // Log GPU memory usage before and after DAG allocation
-                size_t freeMem, totalMem;
-                CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
-                LOG_INFO("GPU memory before DAG allocation: " + std::to_string(freeMem / (1024 * 1024)) + " MB free");
+        if (!useGpu) {
+            return nullptr;
+        }
+        
+        LOG_INFO("  Using GPU for DAG generation");
+        
+        // Allocate GPU memory for cache
+        void* d_cache = nullptr;
+        void* d_dag = nullptr;
+        
+        size_t cacheBytes = cache.size() * sizeof(hash64_t);
+        cudaError_t err = cudaMalloc(&d_cache, cacheBytes);
+        if (err != cudaSuccess) {
+            LOG_ERROR("  Failed to allocate GPU cache memory: " + std::string(cudaGetErrorString(err)));
+            return nullptr;
+        }
+        
+        // Allocate GPU memory for DAG
+        // Log GPU memory usage before and after DAG allocation
+        size_t freeMem, totalMem;
+        CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+        LOG_INFO("GPU memory before DAG allocation: " + std::to_string(freeMem / (1024 * 1024)) + " MB free");
 
-                err = cudaMalloc(&d_dag, dagSize_);
-                if (err != cudaSuccess) {
-                    LOG_ERROR("  Failed to allocate GPU DAG memory: " + std::string(cudaGetErrorString(err)));
-                    LOG_ERROR("  GPU memory exhausted - need at least " + std::to_string(dagSize_ / (1024*1024)) + " MB free VRAM");
-                    cudaFree(d_cache);
-                    return nullptr;
-                }
+        err = cudaMalloc(&d_dag, dagSize_);
+        if (err != cudaSuccess) {
+            LOG_ERROR("  Failed to allocate GPU DAG memory: " + std::string(cudaGetErrorString(err)));
+            LOG_ERROR("  GPU memory exhausted - need at least " + std::to_string(dagSize_ / (1024*1024)) + " MB free VRAM");
+            cudaFree(d_cache);
+            return nullptr;
+        }
 
-                CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
-                LOG_INFO("GPU memory after DAG allocation: " + std::to_string(freeMem / (1024 * 1024)) + " MB free");
-            }
-            
-            if (useGpu) {
-                // Copy cache to GPU
-                err = cudaMemcpy(d_cache, cache.data(), cacheBytes, cudaMemcpyHostToDevice);
-                if (err != cudaSuccess) {
-                    LOG_ERROR("  Failed to copy cache to GPU: " + std::string(cudaGetErrorString(err)));
-                    cudaFree(d_cache);
-                    cudaFree(d_dag);
-                    return nullptr;
-                } else {
-                    LOG_INFO("  ✓ Cache copied to GPU (" + std::to_string(cacheBytes / (1024*1024)) + " MB)");
-                }
-            }
-            
-            if (useGpu) {
-                // Generate DAG on GPU
-                try {
-                    const uint32_t reportInterval = numItems / 20;
-                    std::atomic<bool> completed{false};
-                    
-                    // Progress monitor thread
-                    std::thread monitor([&completed, reportInterval, numItems]() {
-                        for (uint32_t pct = 5; pct <= 95 && !completed.load(); pct += 5) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                            if (!completed.load()) {
-                                LOG_INFO("    Progress: ~" + std::to_string(pct) + "%");
-                            }
-                        }
-                    });
-                    
-                    ohmy::cuda::generateDagGpu(d_cache, d_dag, cache.size(), numItems);
-                    completed.store(true);
-                    monitor.join();
-                    
-                    LOG_INFO("  ✓ DAG generated on GPU");
-                    
-                    // GPU-FIRST: Keep DAG in GPU memory only
-                    // No CPU copy - DAG stays resident in VRAM for mining
-                    LOG_INFO("  DAG remains in GPU memory (zero-copy architecture)");
-                    
-                    // Free host buffer immediately - we don't need 4GB in RAM
-                    if (dagData_) {
-                        std::free(dagData_);
-                        LOG_INFO("  ✓ Freed " + std::to_string(dagSize_ / (1024*1024)) + " MB from host RAM");
-                    }
-                    
-                    // Allocate minimal placeholder (API compatibility)
-                    dagData_ = std::malloc(128);
-                    if (dagData_) {
-                        std::memset(dagData_, 0x42, 128);  // GPU-resident marker
-                    }
-                    
-                    // Cleanup GPU cache only (DAG stays allocated for mining)
-                    cudaFree(d_cache);
-                    
-                    // Store GPU pointer for zero-copy access
-                    d_dag_ = d_dag;
-                    
-                    // IMPORTANT: d_dag is NOT freed - it stays in GPU memory
-                } catch (const std::exception& e) {
-                    LOG_ERROR("  Exception during GPU generation: " + std::string(e.what()));
-                    cudaFree(d_cache);
-                    cudaFree(d_dag);
-                    return nullptr;
-                }
-            }
+        CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+        LOG_INFO("GPU memory after DAG allocation: " + std::to_string(freeMem / (1024 * 1024)) + " MB free");
+        
+        // Copy cache to GPU
+        err = cudaMemcpy(d_cache, cache.data(), cacheBytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            LOG_ERROR("  Failed to copy cache to GPU: " + std::string(cudaGetErrorString(err)));
+            cudaFree(d_cache);
+            cudaFree(d_dag);
+            return nullptr;
         } else {
-            // GPU is REQUIRED - no CPU fallback
-            LOG_ERROR("  GPU mining is REQUIRED (CPU fallback disabled by design)");
+            LOG_INFO("  ✓ Cache copied to GPU (" + std::to_string(cacheBytes / (1024*1024)) + " MB)");
+            // Free the host-side cache now that it's on the device to avoid
+            // holding tens of MB in RAM during the long GPU DAG generation.
+            cache.clear();
+            cache.shrink_to_fit();
+            LOG_DEBUG("  Host cache cleared to minimize RAM usage");
+        }
+        
+        // Generate DAG on GPU
+        try {
+            const uint32_t reportInterval = numItems / 20;
+            std::atomic<bool> completed{false};
+            
+            // Progress monitor thread
+            std::thread monitor([&completed, reportInterval, numItems]() {
+                for (uint32_t pct = 5; pct <= 95 && !completed.load(); pct += 5) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    if (!completed.load()) {
+                        LOG_INFO("    Progress: ~" + std::to_string(pct) + "%");
+                    }
+                }
+            });
+            
+            ohmy::cuda::generateDagGpu(static_cast<const uint64_t*>(d_cache), d_dag, cache.size(), numItems);
+            LOG_INFO("generateDagGpu completed successfully");
+            completed.store(true);
+            monitor.join();
+            
+            LOG_INFO("  ✓ DAG generated on GPU");
+            
+            // GPU-FIRST: Keep DAG in GPU memory only. Do NOT allocate the
+            // full DAG on the host to avoid a large memory spike. Instead
+            // create a small placeholder for API calls that expect a
+            // non-null host pointer.
+            LOG_INFO("  DAG remains in GPU memory (zero-copy architecture)");
+
+            // Allocate minimal placeholder (API compatibility)
+            dagData_ = std::malloc(128);
+            if (dagData_) {
+                std::memset(dagData_, 0x42, 128);  // GPU-resident marker
+            }
+            
+            // Cleanup GPU cache only (DAG stays allocated for mining)
+            cudaFree(d_cache);
+            
+            // Store GPU pointer for zero-copy access
+            d_dag_ = d_dag;
+            
+            // IMPORTANT: d_dag is NOT freed - it stays in GPU memory
+        } catch (const std::exception& e) {
+            LOG_ERROR("  Exception during GPU generation: " + std::string(e.what()));
+            cudaFree(d_cache);
+            cudaFree(d_dag);
             return nullptr;
         }
         
@@ -226,11 +208,17 @@ public:
 
     void freeHostMemory() {
         if (dagData_) {
-            size_t freedMB = dagSize_ / (1024 * 1024);
+            // If we had allocated the full DAG on host dagSize_ will be large;
+            // otherwise we allocated a small placeholder. Report accordingly.
+            bool placeholder = (dagSize_ == 0) || (dagSize_ < (4 * 1024 * 1024));
             std::free(dagData_);
             dagData_ = nullptr;
-            // Keep dagSize_ for API compatibility
-            LOG_INFO("✓ Freed " + std::to_string(freedMB) + " MB of DAG from host RAM");
+            if (!placeholder) {
+                size_t freedMB = dagSize_ / (1024 * 1024);
+                LOG_INFO("✓ Freed " + std::to_string(freedMB) + " MB of DAG from host RAM");
+            } else {
+                LOG_INFO("✓ Freed host DAG placeholder (minimal RAM reclaimed)");
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 # Source files
 set(SOURCES
     miner_main.cpp
+    core/mining_engine.cpp
     core/ethash.cpp
     core/keccak.cpp
     network/stratum_client.cpp

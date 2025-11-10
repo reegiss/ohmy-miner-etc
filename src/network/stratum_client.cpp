@@ -116,6 +116,8 @@ public:
         
         std::string msg = message.dump() + "\n";
         LOG_INFO("Subscribing to pool: " + msg);
+        LOG_INFO("Subscribe message sent: " + msg);
+        LOG_INFO("Waiting for subscribe response...");
         
         if (!sendMessage(msg)) {
             return false;
@@ -535,6 +537,7 @@ private:
                     if (onJob_) {
                         LOG_DEBUG("Calling onJob callback...");
                         onJob_(job);
+                        LOG_INFO("Job callback executed: jobId=" + job.jobId + ", epoch=" + std::to_string(job.epoch));
                     } else {
                         LOG_WARN("onJob callback is not set!");
                     }
